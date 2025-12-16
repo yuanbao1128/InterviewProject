@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #app { height: 100%; }
+.container { max-width: 960px; margin: 0 auto; padding: 16px; }

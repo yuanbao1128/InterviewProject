@@ -1,0 +1,47 @@
+{
+  "title": "AI 面试练习助手",
+  "home": {
+    "hero": "开启你的 AI 模拟面试之旅",
+    "sub": "针对转岗与跨行业求职者，提供接近真实的面试演练与专业反馈。",
+    "cta": "开始练习",
+    "candidate": "我是求职者",
+    "interviewer": "我是面试官（暂未开放）"
+  },
+  "setup": {
+    "header": "完善背景信息",
+    "step": "步骤 1/2",
+    "upload": "上传简历",
+    "uploadHint": "点击上传 PDF / Word 文件",
+    "company": "目标公司",
+    "role": "目标岗位",
+    "jd": "职位描述 (JD)",
+    "next": "下一步：配置面试风格",
+    "back": "上一步",
+    "styleHeader": "定制面试风格",
+    "step2": "步骤 2/2",
+    "duration": "面试时长",
+    "fast": "15 分钟（快速演练）",
+    "standard": "30 分钟（标准流程）",
+    "interviewerRole": "面试官角色",
+    "hr": "HR 面试官",
+    "biz": "业务负责人",
+    "style": "面试风格",
+    "friendly": "友好",
+    "neutral": "中性",
+    "strict": "严格(压力)",
+    "start": "开始模拟面试",
+    "building": "系统正在根据简历构建知识图谱，预计生成 5-8 个核心问题"
+  },
+  "interview": {
+    "status": "风格: {style} | 状态: 提问中",
+    "progress": "进度: 第 {current}/{total} 题",
+    "end": "结束面试"
+  },
+  "report": {
+    "title": "面试评估报告",
+    "export": "导出报告",
+    "overall": "综合评分",
+    "again": "再练一次",
+    "backHome": "返回首页"
+  }
+}
