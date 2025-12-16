@@ -1,0 +1,16 @@
+{
+  "name": "ai-mock-interview-mvp",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "api"
+  ],
+  "scripts": {
+    "dev": "pnpm -C api dev & pnpm -C frontend dev",
+    "build": "pnpm -C api build && pnpm -C frontend build"
+  },
+  "engines": {
+    "node": ">=18.18 <=22"
+  },
+  "packageManager": "pnpm@9.12.0"
+}
