@@ -1,4 +1,4 @@
-// api/lib/llm.ts
+// api/src/server/lib/llm.ts
 import OpenAI from 'openai'
 
 const PROVIDER = process.env.LLM_PROVIDER || 'openai' // 'openai' | 'deepseek'

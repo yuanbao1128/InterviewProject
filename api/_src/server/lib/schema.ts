@@ -1,7 +1,7 @@
-import { z } from 'zod';
+import { z } from 'zod'
 
 export const StartPayload = z.object({
-  userId: z.string().uuid().optional(), // MVP 可为空
+  userId: z.string().uuid().optional(),
   targetCompany: z.string().optional(),
   targetRole: z.string().optional(),
   jdText: z.string().optional(),
@@ -10,7 +10,7 @@ export const StartPayload = z.object({
   style: z.enum(['友好','中性','严格']),
   duration: z.number().int().positive(),
   resumeSummary: z.any().optional()
-});
+})
 
 export const Question = z.object({
   id: z.string().uuid(),
@@ -20,11 +20,11 @@ export const Question = z.object({
   text: z.string(),
   intent: z.string().optional().nullable(),
   rubricRef: z.string().optional().nullable()
-});
+})
 
 export const AnswerInput = z.object({
   interviewId: z.string().uuid(),
   questionId: z.string().uuid(),
   turnNo: z.number().int().min(1),
   content: z.string().min(1)
-});
+})

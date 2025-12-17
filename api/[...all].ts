@@ -12,27 +12,27 @@ const envLocal = path.join(__dirname, '.env.local')
 const envFile = fs.existsSync(envLocal) ? envLocal : path.join(__dirname, '.env')
 dotenv.config({ path: envFile })
 
-// ② 下面是你原有的应用代码
+// ② 应用代码
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { prettyJSON } from 'hono/pretty-json'
 
-// 子路由
-import upload from './routes/upload.js'
-import parseResume from './routes/parse-resume.js'
-import startInterview from './routes/start-interview.js'
-import nextQuestion from './routes/next-question.js'
-import submitAnswer from './routes/submit-answer.js'
-import finish from './routes/finish.js'
-import report from './routes/report.js'
-import metrics from './routes/metrics.js'
+// 子路由（node16/nodenext 必须带 .js 后缀）
+import upload from './_src/server/routes/upload.js'
+import parseResume from './_src/server/routes/parse-resume.js'
+import startInterview from './_src/server/routes/start-interview.js'
+import nextQuestion from './_src/server/routes/next-question.js'
+import submitAnswer from './_src/server/routes/submit-answer.js'
+import finish from './_src/server/routes/finish.js'
+import report from './_src/server/routes/report.js'
+import metrics from './_src/server/routes/metrics.js'
 
 const app = new Hono()
 
 app.use('', cors())
 app.use('', prettyJSON())
 
-// 所有业务路由挂到 /api 下，保持前端调用路径不变
+// 统一挂到 /api
 app.route('/api', upload)
 app.route('/api', parseResume)
 app.route('/api', startInterview)
