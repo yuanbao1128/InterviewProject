@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
-import { query } from '../lib/db.ts'
-import { client, MODEL } from '../lib/llm.ts'
+import { query } from '../lib/db.js'
+import { client, MODEL } from '../lib/llm.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'

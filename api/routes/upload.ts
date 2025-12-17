@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { supabase, STORAGE_BUCKET } from '../lib/supabase.ts';
+import { supabase, STORAGE_BUCKET } from '../lib/supabase.js';
 
 const r = new Hono();
 

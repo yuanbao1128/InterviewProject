@@ -18,14 +18,14 @@ import { cors } from 'hono/cors'
 import { prettyJSON } from 'hono/pretty-json'
 
 // 子路由
-import upload from './routes/upload.ts'
-import parseResume from './routes/parse-resume.ts'
-import startInterview from './routes/start-interview.ts'
-import nextQuestion from './routes/next-question.ts'
-import submitAnswer from './routes/submit-answer.ts'
-import finish from './routes/finish.ts'
-import report from './routes/report.ts'
-import metrics from './routes/metrics.ts'
+import upload from './routes/upload.js'
+import parseResume from './routes/parse-resume.js'
+import startInterview from './routes/start-interview.js'
+import nextQuestion from './routes/next-question.js'
+import submitAnswer from './routes/submit-answer.js'
+import finish from './routes/finish.js'
+import report from './routes/report.js'
+import metrics from './routes/metrics.js'
 
 const app = new Hono()
 

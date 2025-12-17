@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { query } from '../lib/db.ts';
+import { query } from '../lib/db.js';
 
 const r = new Hono();
 
