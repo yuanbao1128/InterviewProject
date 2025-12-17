@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { client, MODEL } from '../lib/llm';
+import { client, MODEL } from '../lib/llm.ts';
 
 const r = new Hono();
 
