@@ -52,11 +52,6 @@ r.post('/start-interview', async (c) => {
 
   const t0 = Date.now()
   let list: any[] = []
-  try {
-    const res = await client.chat.chat.completions.create({
-      // 兼容包统一用 client.chat.completions
-    } as any)
-  } catch {}
   // 兼容 openai sdk 正确写法：
   try {
     const res = await client.chat.completions.create({
