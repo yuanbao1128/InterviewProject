@@ -1,10 +1,5 @@
 // api/src/server/lib/pdf.ts
 import { supabase } from './supabase.js'
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs'
-
-// 在 Node 环境为 pdfjs 指定 worker
-GlobalWorkerOptions.workerSrc = pdfjsWorker as any
 
 /**
  * 从 Supabase Storage 下载私有文件为 ArrayBuffer
@@ -17,26 +12,19 @@ export async function downloadFromStorage(bucket: string, path: string): Promise
 }
 
 /**
- * 使用 pdfjs-dist 将 PDF（二进制）提取为纯文本
+ * 使用 pdf-parse 将 PDF（二进制）提取为纯文本
+ * 说明：
+ * - 采用动态导入 CommonJS 入口（pdf-parse 默认导出）以兼容 ESM 环境
+ * - 避免直接依赖 ESM 子路径（不同版本路径可能变化）
  */
 export async function pdfArrayBufferToText(buf: ArrayBuffer): Promise<string> {
-  const loadingTask = getDocument({ data: buf })
-  const pdf = await loadingTask.promise
-  try {
-    const max = pdf.numPages
-    const chunks: string[] = []
-    for (let i = 1; i <= max; i++) {
-      const page = await pdf.getPage(i)
-      const content = await page.getTextContent()
-      const strs = (content.items as any[]).map((it: any) => it.str).filter(Boolean)
-      chunks.push(strs.join(' '))
-    }
-    const text = chunks.join('\n')
-    return normalizeText(text)
-  } finally {
-    await pdf.cleanup()
-    await pdf.destroy()
-  }
+  // 动态导入 CommonJS 入口。注意这里不带子路径，直接 'pdf-parse'
+  const mod: any = await import('pdf-parse')
+  const pdfParse = mod.default || mod // 兼容不同打包方式
+
+  const b = Buffer.from(buf)
+  const res = await pdfParse(b)
+  return normalizeText(res.text || '')
 }
 
 /**
