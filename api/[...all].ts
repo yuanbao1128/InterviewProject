@@ -46,3 +46,12 @@ export const GET = app.fetch
 export const POST = app.fetch
 export const PUT = app.fetch
 export const DELETE = app.fetch
+
+// 本地开发：如果直接用 tsx 运行该文件，则启动本地 HTTP 服务器
+if (process.argv[1] && process.argv[1].endsWith('[...all].ts')) {
+  // 延迟导入，避免在无服务器环境打包进来
+  const { serve } = await import('@hono/node-server')
+  const port = Number(process.env.PORT) || 3000
+  console.log(`[dev] Starting Hono server on http://localhost:${port}`)
+  serve({ fetch: app.fetch, port })
+}

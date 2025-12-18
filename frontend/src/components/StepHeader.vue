@@ -1,7 +1,7 @@
 <template>
-  <div class="mb-4">
-    <div class="text-gray-500">{{ step }}</div>
-    <h2 class="text-xl font-semibold">{{ title }}</h2>
+  <div class="mb-4 md:mb-5">
+    <div class="text-gray-500 text-sm">{{ step }}</div>
+    <h2 class="text-xl font-semibold mt-1">{{ title }}</h2>
   </div>
 </template>
 <script setup lang="ts">

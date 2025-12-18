@@ -1,33 +1,47 @@
 <template>
   <div class="container">
+    <!-- 步骤1：完善背景信息 -->
     <StepHeader :step="t.step" :title="t.header" />
-    <UploadCard :t="t" @uploaded="onUploaded" />
-    <div class="grid gap-3 mt-4">
+    <div class="grid gap-4">
+      <UploadCard :t="t" @uploaded="onUploaded" />
+
       <label class="block">
-        <div class="mb-1">{{ t.company }}</div>
-        <input v-model="company" class="w-full border rounded p-2" />
+        <div class="mb-1 font-medium">{{ t.company }}</div>
+        <input v-model="company" class="w-full border rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-gray-900/10" />
       </label>
+
       <label class="block">
-        <div class="mb-1">{{ t.role }}</div>
-        <input v-model="role" class="w-full border rounded p-2" />
+        <div class="mb-1 font-medium">{{ t.role }}</div>
+        <input v-model="role" class="w-full border rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-gray-900/10" />
       </label>
+
       <label class="block">
-        <div class="mb-1">{{ t.jd }}</div>
-        <textarea v-model="jd" class="w-full border rounded p-2" rows="5">1. 负责B端SaaS产品的规划与设计；
+        <div class="mb-1 font-medium">{{ t.jd }}</div>
+        <textarea v-model="jd" rows="5"
+          class="w-full border rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-gray-900/10"
+        >1. 负责B端SaaS产品的规划与设计；
 2. 具备优秀的数据分析能力，能通过数据驱动业务迭代；
 3. 优秀的跨部门沟通协作能力。</textarea>
       </label>
     </div>
 
-    <StepHeader :step="t.step2" :title="t.styleHeader" class="mt-6" />
+    <!-- 步骤2：定制面试风格 -->
+    <StepHeader :step="t.step2" :title="t.styleHeader" class="mt-8" />
     <StylePicker :t="t" @change="v => style = v" />
 
     <div class="mt-6">
       <LoadingHint v-if="loading" />
-      <button :disabled="loading" class="bg-blue-600 text-white px-4 py-2 rounded" @click="start">{{ t.start }}</button>
+      <button
+        :disabled="loading"
+        class="inline-flex items-center rounded-md bg-gray-900 disabled:opacity-60 text-white px-5 py-2.5 hover:bg-black"
+        @click="start"
+      >
+        {{ t.start }}
+      </button>
     </div>
   </div>
 </template>
+
 <script setup lang="ts">
 import StepHeader from '../components/StepHeader.vue';
 import UploadCard from '../components/UploadCard.vue';
@@ -51,7 +65,6 @@ function onUploaded(url: string){ fileUrl.value = url; }
 
 async function start(){
   loading.value = true;
-  // 简化：不做PDF解析，这里直接把JD作为上下文；你可在后续接入 parse-resume
   await store.start({
     targetCompany: company.value,
     targetRole: role.value,
@@ -63,7 +76,6 @@ async function start(){
   });
   await store.fetchQuestion();
   loading.value = false;
-  // 跳转到面试
   history.pushState({}, '', `/interview/${store.interviewId}`);
   window.location.assign(`/interview/${store.interviewId}`);
 }

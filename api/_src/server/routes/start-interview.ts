@@ -5,6 +5,7 @@ import { StartPayload } from '../lib/schema.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { auditLLM } from '../lib/util.js'
 
 const r = new Hono()
 
@@ -12,6 +13,10 @@ function resolvePrompt(...segments: string[]) {
   const __filename = fileURLToPath(import.meta.url)
   const __dirname = path.dirname(__filename)
   return path.join(__dirname, '..', 'lib', 'prompts', ...segments)
+}
+
+function maxFollowupsByDuration(mins: number) {
+  return mins <= 15 ? 1 : 2
 }
 
 r.post('/start-interview', async (c) => {
@@ -45,20 +50,52 @@ r.post('/start-interview', async (c) => {
     `JD:\n${payload.jdText || ''}\n` +
     `简历要点:\n${JSON.stringify(payload.resumeSummary || {})}`
 
-  const res = await client.chat.completions.create({
-    model: MODEL,
-    messages: [
-      { role: 'system', content: sys },
-      { role: 'user', content: '请生成问题清单（5-8题），包含order_no, topic, text, intent, rubric_ref。' }
-    ],
-    temperature: 0.3
-  })
-
+  const t0 = Date.now()
   let list: any[] = []
   try {
-    list = JSON.parse(res.choices[0]?.message?.content || '[]')
-  } catch {
+    const res = await client.chat.chat.completions.create({
+      // 兼容包统一用 client.chat.completions
+    } as any)
+  } catch {}
+  // 兼容 openai sdk 正确写法：
+  try {
+    const res = await client.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: '请生成问题清单（5-8题），包含order_no, topic, text, intent, rubric_ref。' }
+      ],
+      temperature: 0.3
+    })
+
+    const latency = Date.now() - t0
+    try {
+      list = JSON.parse(res.choices[0]?.message?.content || '[]')
+    } catch {
+      list = []
+    }
+
+    await auditLLM(query, {
+      interviewId,
+      phase: 'planning',
+      model: MODEL,
+      promptTokens: res.usage?.prompt_tokens ?? null,
+      completionTokens: res.usage?.completion_tokens ?? null,
+      totalTokens: res.usage?.total_tokens ?? null,
+      latencyMs: latency,
+      success: true,
+      error: null
+    })
+  } catch (e: any) {
     list = []
+    await auditLLM(query, {
+      interviewId,
+      phase: 'planning',
+      model: MODEL,
+      latencyMs: Date.now() - t0,
+      success: false,
+      error: String(e?.message || e)
+    })
   }
 
   if (!Array.isArray(list) || list.length === 0) {
@@ -74,6 +111,7 @@ r.post('/start-interview', async (c) => {
     }))
   }
 
+  // 插入 questions
   for (const q of list) {
     await query(
       `insert into app.questions (interview_id, order_no, topic, text, intent, rubric_ref)
@@ -81,6 +119,23 @@ r.post('/start-interview', async (c) => {
       [interviewId, q.order_no, q.topic, q.text, q.intent || null, q.rubric_ref || null]
     )
   }
+
+  // 保存规划与进度
+  await query(
+    `update app.interviews
+        set planning = $1,
+            progress_state = $2
+      where id = $3`,
+    [
+      JSON.stringify(list),
+      JSON.stringify({
+        current: 1,
+        total: list.length,
+        followups_left: maxFollowupsByDuration(payload.duration)
+      }),
+      interviewId
+    ]
+  )
 
   return c.json({ ok: true, data: { interviewId, total: list.length } })
 })

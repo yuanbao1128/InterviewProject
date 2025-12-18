@@ -2,5 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 页面基础节奏与容器宽度 */
 html, body, #app { height: 100%; }
-.container { max-width: 960px; margin: 0 auto; padding: 16px; }
+body { @apply bg-white text-gray-900; }
+
+/* 与原型相近的中央容器宽度与内边距 */
+.container { max-width: 960px; margin: 0 auto; padding: 24px; }
+
+/* 更统一的标题节奏 */
+.h-section-title { @apply text-xl font-semibold; }
+.h-subtle { @apply text-sm text-gray-500; }

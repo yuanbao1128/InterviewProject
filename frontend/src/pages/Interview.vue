@@ -1,10 +1,26 @@
 <template>
   <div class="container">
-    <div class="flex items-center justify-between my-4">
-      <div class="text-gray-700">业务负责人 | 风格: 中性 | 状态: 提问中</div>
-      <div class="text-sm text-gray-500">进度: 第 {{ store.current }}/{{ store.total }} 题</div>
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 my-4">
+      <div class="text-gray-700">
+        {{ store.role }} <span class="mx-1 text-gray-300">|</span> 风格: {{ store.style }} <span class="mx-1 text-gray-300">|</span> 状态: 提问中
+      </div>
+      <div class="flex items-center gap-4 text-sm text-gray-500">
+        <span>{{ store.timeDisplay() }}</span>
+        <span>进度: 第 {{ store.current }}/{{ store.total }} 题</span>
+      </div>
     </div>
-    <ChatPanel :style="'中性'" :total="store.total" :current="store.current" :question="store.question" @answered="onAnswered" @finish="onFinish" />
+
+    <ChatPanel
+      :style="store.style"
+      :total="store.total"
+      :current="store.current"
+      :question="store.question"
+      @answered="onAnswered"
+      @finish="onFinish"
+    />
+
+    <div class="text-xs text-gray-500 mt-2">面试开始于 {{ store.startedAt }}</div>
+    <div class="text-xs text-gray-500 mt-1">AI 可能会产生不准确的信息</div>
   </div>
 </template>
 <script setup lang="ts">
@@ -16,14 +32,10 @@ const store = useApp();
 onMounted(async () => {
   if (!store.question) await store.fetchQuestion();
 });
-async function onAnswered(){
-  if (store.current <= store.total) {
-    await store.fetchQuestion();
-  } else {
-    await onFinish();
-  }
+async function onAnswered() {
+  await store.fetchQuestion();
 }
-async function onFinish(){
+async function onFinish() {
   await store.finish();
   window.location.assign(`/report/${store.interviewId}`);
 }

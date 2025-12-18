@@ -1,5 +1,5 @@
 <template>
-  <div class="border rounded p-4">
+  <div class="border rounded-lg p-4">
     <div class="font-medium mb-2">综合评分：{{ overall ?? '-' }}</div>
     <ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
       <li>岗位匹配度：{{ dims.match?.score ?? dims.match ?? '-' }}</li>

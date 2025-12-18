@@ -1,9 +1,13 @@
 <template>
-  <div class="border rounded p-4">
+  <div class="border rounded-lg p-4 md:p-5">
     <div class="font-medium mb-2">{{ t.upload }}</div>
-    <input type="file" @change="onFile" />
-    <div class="text-sm text-gray-500 mt-2">{{ t.uploadHint }} | 支持最大 10MB</div>
-    <div v-if="fileName" class="text-sm mt-2">{{ fileName }}</div>
+    <div class="flex items-center gap-3">
+      <input type="file" class="block" @change="onFile" />
+      <span v-if="fileName" class="text-sm text-gray-700">{{ fileName }}</span>
+    </div>
+    <div class="text-sm text-gray-500 mt-2">
+      {{ t.uploadHint }} · 支持最大 10MB
+    </div>
   </div>
 </template>
 <script setup lang="ts">
