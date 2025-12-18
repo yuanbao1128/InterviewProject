@@ -1,6 +1,6 @@
 // api/[...all].ts
-// ① 在任何业务 import 之前加载本地环境变量（仅本地开发用）
-// Vercel 部署时，平台会自动注入环境变量，这段不会产生副作用。
+
+// ① 本地环境变量加载（仅本地生效；Vercel 线上由平台注入）
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +10,9 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const envLocal = path.join(__dirname, '.env.local')
 const envFile = fs.existsSync(envLocal) ? envLocal : path.join(__dirname, '.env')
-dotenv.config({ path: envFile })
+if (process.env.VERCEL !== '1') {
+  dotenv.config({ path: envFile })
+}
 
 // ② 应用代码
 import { Hono } from 'hono'
@@ -29,8 +31,42 @@ import metrics from './_src/server/routes/metrics.js'
 
 const app = new Hono()
 
-app.use('', cors())
-app.use('', prettyJSON())
+// 全局错误兜底（防止 500 时没有日志）
+app.onError((err, c) => {
+  console.error('[app.onError]', {
+    method: c.req.method,
+    url: c.req.url,
+    message: err?.message,
+    stack: err?.stack
+  })
+  return c.json({ ok: false, error: err?.message || 'Internal Server Error' }, 500)
+})
+
+// 请求进入日志（便于排查 content-type/大小）
+app.use('*', async (c, next) => {
+  const ct = c.req.header('content-type') || ''
+  const clen = c.req.header('content-length') || ''
+  console.log('[req]', {
+    method: c.req.method,
+    url: c.req.url,
+    contentType: ct,
+    contentLength: clen
+  })
+  return next()
+})
+
+// CORS
+app.use(
+  '*',
+  cors({
+    origin: '*',
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  })
+)
+
+// 美化 JSON（开发友好）
+app.use('*', prettyJSON())
 
 // 统一挂到 /api
 app.route('/api', upload)
@@ -42,14 +78,15 @@ app.route('/api', finish)
 app.route('/api', report)
 app.route('/api', metrics)
 
+// 导出给 Vercel 适配器
 export const GET = app.fetch
 export const POST = app.fetch
 export const PUT = app.fetch
 export const DELETE = app.fetch
+export const OPTIONS = app.fetch
 
-// 本地开发：如果直接用 tsx 运行该文件，则启动本地 HTTP 服务器
+// 本地开发：直接用 tsx 运行该文件时启动本地 HTTP server
 if (process.argv[1] && process.argv[1].endsWith('[...all].ts')) {
-  // 延迟导入，避免在无服务器环境打包进来
   const { serve } = await import('@hono/node-server')
   const port = Number(process.env.PORT) || 3000
   console.log(`[dev] Starting Hono server on http://localhost:${port}`)
