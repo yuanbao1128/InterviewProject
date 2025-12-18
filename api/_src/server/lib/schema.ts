@@ -2,14 +2,16 @@ import { z } from 'zod'
 
 export const StartPayload = z.object({
   userId: z.string().uuid().optional(),
-  targetCompany: z.string().optional(),
-  targetRole: z.string().optional(),
-  jdText: z.string().optional(),
-  resumeFileUrl: z.string().optional(),
+  targetCompany: z.string().optional().nullable(),
+  targetRole: z.string().optional().nullable(),
+  jdText: z.string().optional().nullable(),
+  // 放宽为可选且可为 null；前端未上传成功时可不传或传 null
+  resumeFileUrl: z.string().min(1).optional().nullable(),
   role: z.enum(['HR','业务负责人','技术']),
   style: z.enum(['友好','中性','严格']),
   duration: z.number().int().positive(),
-  resumeSummary: z.any().optional()
+  // 解析后的简历摘要，可选且可为 null
+  resumeSummary: z.any().optional().nullable()
 })
 
 export const Question = z.object({
