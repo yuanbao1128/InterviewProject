@@ -1,3 +1,4 @@
+// api/src/server/routes/start-interview.ts
 import { Hono } from 'hono'
 import { query } from '../lib/db.js'
 import { client, MODEL } from '../lib/llm.js'
@@ -6,6 +7,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { auditLLM } from '../lib/util.js'
+import { STORAGE_BUCKET } from '../lib/supabase.js'
+import { downloadFromStorage, pdfArrayBufferToText } from '../lib/pdf.js'
 
 const r = new Hono()
 
@@ -19,9 +22,70 @@ function maxFollowupsByDuration(mins: number) {
   return mins <= 15 ? 1 : 2
 }
 
+// 复用与 /parse-resume 相同的提示词，服务端内部直接解析（不用暴露调用）
+async function parseResumeTextToSummary(text: string, interviewId?: string) {
+  const sys =
+    '你是资深招聘顾问，请将简历要点结构化提炼，输出 JSON：' +
+    '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}'
+  const t0 = Date.now()
+  try {
+    const res = await client.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: text }
+      ],
+      temperature: 0.2
+    })
+    const latency = Date.now() - t0
+    const content = res.choices[0]?.message?.content || '{}'
+    const parsed = JSON.parse(content)
+
+    await auditLLM(query, {
+      interviewId: interviewId || null,
+      phase: 'parse',
+      model: MODEL,
+      promptTokens: res.usage?.prompt_tokens ?? null,
+      completionTokens: res.usage?.completion_tokens ?? null,
+      totalTokens: res.usage?.total_tokens ?? null,
+      latencyMs: latency,
+      success: true,
+      error: null
+    })
+    return parsed
+  } catch (e: any) {
+    await auditLLM(query, {
+      interviewId: interviewId || null,
+      phase: 'parse',
+      model: MODEL,
+      latencyMs: null,
+      success: false,
+      error: String(e?.message || e)
+    })
+    return null
+  }
+}
+
 r.post('/start-interview', async (c) => {
   const body = await c.req.json()
   const payload = StartPayload.parse(body)
+
+  let resumeSummary = payload.resumeSummary || null
+
+  // 如果未传 resumeSummary，但传了 resumeFileUrl，则自动从 Storage 下载 PDF → 提取文本 → 解析摘要
+  if (!resumeSummary && payload.resumeFileUrl) {
+    try {
+      const key = payload.resumeFileUrl
+      const buf = await downloadFromStorage(STORAGE_BUCKET, key)
+      const text = await pdfArrayBufferToText(buf)
+      const parsed = await parseResumeTextToSummary(text, undefined) // 修复这里
+      if (parsed) {
+        resumeSummary = parsed
+      }
+    } catch (e: any) {
+      console.warn('[start-interview] auto-parse resume failed:', e?.message || e)
+    }
+  }
 
   const { rows: ir } = await query<{ id: string }>(
     `insert into app.interviews
@@ -38,7 +102,7 @@ r.post('/start-interview', async (c) => {
       payload.targetRole || null,
       payload.jdText || null,
       payload.resumeFileUrl || null,
-      payload.resumeSummary ? JSON.stringify(payload.resumeSummary) : null
+      resumeSummary ? JSON.stringify(resumeSummary) : null
     ]
   )
   const interviewId = ir[0].id
@@ -48,11 +112,10 @@ r.post('/start-interview', async (c) => {
   const sys =
     `${planningPrompt}\n请严格输出 JSON。上下文：\n` +
     `JD:\n${payload.jdText || ''}\n` +
-    `简历要点:\n${JSON.stringify(payload.resumeSummary || {})}`
+    `简历要点:\n${JSON.stringify(resumeSummary || {})}`
 
   const t0 = Date.now()
   let list: any[] = []
-  // 兼容 openai sdk 正确写法：
   try {
     const res = await client.chat.completions.create({
       model: MODEL,
@@ -106,7 +169,6 @@ r.post('/start-interview', async (c) => {
     }))
   }
 
-  // 插入 questions
   for (const q of list) {
     await query(
       `insert into app.questions (interview_id, order_no, topic, text, intent, rubric_ref)
@@ -115,7 +177,6 @@ r.post('/start-interview', async (c) => {
     )
   }
 
-  // 保存规划与进度
   await query(
     `update app.interviews
         set planning = $1,
