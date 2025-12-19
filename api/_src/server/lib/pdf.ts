@@ -7,8 +7,10 @@ import { spawn } from 'child_process';
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!; // 或 SUPABASE_SERVICE_ROLE_KEY
+
+// 引擎选择：默认纯 JS；如设置 PDF_ENGINE=poppler 且检测到 pdftotext 存在，则优先用 poppler
 const PDF_ENGINE = (process.env.PDF_ENGINE || 'js').toLowerCase(); // 'js' | 'poppler'
-const PDF_TIMEOUT_MS = Number(process.env.PDF_TIMEOUT_MS || 60000); // 解析超时兜底
+const PDF_TIMEOUT_MS = Number(process.env.PDF_TIMEOUT_MS || 60000); // 超时兜底
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_KEY');
@@ -18,6 +20,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false },
 });
 
+// 下载文件为 ArrayBuffer
 export async function downloadFromStorage(bucket: string, filePath: string, traceId?: string): Promise<ArrayBuffer> {
   const t0 = Date.now();
   console.log('[pdf] storage.download.start', JSON.stringify({ traceId, bucket, filePath }));
@@ -33,61 +36,71 @@ export async function downloadFromStorage(bucket: string, filePath: string, trac
   return ab;
 }
 
+// 统一入口：根据引擎选择解析
 export async function pdfArrayBufferToText(ab: ArrayBuffer, traceId?: string): Promise<string> {
-  const engine = PDF_ENGINE === 'poppler' ? 'poppler' : 'js';
-  if (engine === 'poppler') {
-    const hasPdftotext = await canSpawnPdftotext(traceId);
-    if (!hasPdftotext) {
+  // 重要：统一转为 Uint8Array，避免库要求“请传 Uint8Array 而非 Buffer”的错误
+  const u8 = ab instanceof Uint8Array ? ab : new Uint8Array(ab);
+
+  const wantPoppler = PDF_ENGINE === 'poppler';
+  if (wantPoppler) {
+    const ok = await canSpawnPdftotext(traceId);
+    if (!ok) {
       console.log('[pdf] engine.fallback', JSON.stringify({ traceId, from: 'poppler', to: 'js', reason: 'pdftotext not found' }));
-      return await parseWithUnpdf(ab, traceId);
+      return await parseWithUnpdf(u8, traceId);
     }
     try {
-      return await parseWithPdfTextExtract(ab, traceId);
+      return await parseWithPdfTextExtract(u8, traceId);
     } catch (e: any) {
       console.log('[pdf] engine.poppler.error.fallback', JSON.stringify({ traceId, err: String(e?.message || e) }));
-      return await parseWithUnpdf(ab, traceId);
+      return await parseWithUnpdf(u8, traceId);
     }
   } else {
     try {
-      return await parseWithUnpdf(ab, traceId);
+      return await parseWithUnpdf(u8, traceId);
     } catch (e: any) {
       console.log('[pdf] engine.js.error', JSON.stringify({ traceId, err: String(e?.message || e) }));
-      const hasPdftotext = await canSpawnPdftotext(traceId);
-      if (hasPdftotext) {
+      const ok = await canSpawnPdftotext(traceId);
+      if (ok) {
         console.log('[pdf] engine.fallback', JSON.stringify({ traceId, from: 'js', to: 'poppler' }));
-        return await parseWithPdfTextExtract(ab, traceId);
+        return await parseWithPdfTextExtract(u8, traceId);
       }
       throw e;
     }
   }
 }
 
-async function parseWithUnpdf(ab: ArrayBuffer, traceId?: string): Promise<string> {
+// 纯 JS 引擎（unpdf）：要求传入 Uint8Array/Buffer，但为严谨起见统一传 Uint8Array
+async function parseWithUnpdf(u8: Uint8Array, traceId?: string): Promise<string> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdfx-'));
   const tmpFile = path.join(tmpDir, 'input.pdf');
+
   try {
     const tWrite0 = Date.now();
-    await fs.writeFile(tmpFile, Buffer.from(ab));
-    console.log('[pdf] writeTmp.ok', JSON.stringify({ traceId, tmpDir, tmpFile, ms: Date.now() - tWrite0, bytes: ab.byteLength }));
+    await fs.writeFile(tmpFile, Buffer.from(u8));
+    console.log('[pdf] writeTmp.ok', JSON.stringify({ traceId, tmpDir, tmpFile, ms: Date.now() - tWrite0, bytes: u8.byteLength }));
 
     console.log('[pdf] unpdf.start', JSON.stringify({ traceId, tmpFile }));
     const t0 = Date.now();
 
-    // 动态导入并用命名属性，避免 TS 的 default 报错
-    const unpdfMod: any = await import('unpdf');
-    // 有的版本导出为 { extractText }, 有的为 default: { extractText }
-    const extractText = (unpdfMod?.extractText || unpdfMod?.default?.extractText) as ((buf: Buffer, opts?: any) => Promise<{ text: string }>);
-    if (typeof extractText !== 'function') {
+    // 动态导入并兼容不同导出形态
+    const mod: any = await import('unpdf');
+    const extractText: undefined | ((buf: Uint8Array, opts?: any) => Promise<{ text: string }>) =
+      (mod && typeof mod.extractText === 'function' && mod.extractText)
+      || (mod && mod.default && typeof mod.default.extractText === 'function' && mod.default.extractText);
+
+    if (!extractText) {
       throw new Error('unpdf.extractText not found');
     }
 
+    // 一些库支持 AbortSignal，这里提供一个超时控制；若不支持也不影响
     const controller = new AbortController();
     const to = setTimeout(() => {
       try { (controller as any).abort?.(); } catch {}
     }, PDF_TIMEOUT_MS);
 
     try {
-      const res = await extractText(Buffer.from(ab), {
+      // 关键：传入 Uint8Array，而非 Node Buffer
+      const res = await extractText(u8, {
         mergePages: true,
         sortByY: true,
         signal: (controller as any).signal,
@@ -111,9 +124,12 @@ async function parseWithUnpdf(ab: ArrayBuffer, traceId?: string): Promise<string
   }
 }
 
-async function parseWithPdfTextExtract(ab: ArrayBuffer, traceId?: string): Promise<string> {
-  // 兼容 default/namespace 两种导出
-  const mod: any = await import('pdf-text-extract');
+// poppler 引擎（pdf-text-extract）：Vercel 默认无 pdftotext，会自动回退；自托管可使用
+async function parseWithPdfTextExtract(u8: Uint8Array, traceId?: string): Promise<string> {
+  // 兼容 default/命名导出
+  const mod: any = await import('pdf-text-extract').catch((e: any) => {
+    throw new Error(`pdf-text-extract import failed: ${e?.message || e}`);
+  });
   const extract = (mod?.default || mod) as any;
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdfx-'));
@@ -121,15 +137,14 @@ async function parseWithPdfTextExtract(ab: ArrayBuffer, traceId?: string): Promi
 
   try {
     const tWrite0 = Date.now();
-    await fs.writeFile(tmpFile, Buffer.from(ab));
-    console.log('[pdf] writeTmp.ok', JSON.stringify({ traceId, tmpDir, tmpFile, ms: Date.now() - tWrite0, bytes: ab.byteLength }));
+    await fs.writeFile(tmpFile, Buffer.from(u8));
+    console.log('[pdf] writeTmp.ok', JSON.stringify({ traceId, tmpDir, tmpFile, ms: Date.now() - tWrite0, bytes: u8.byteLength }));
 
     console.log('[pdf] extract.start', JSON.stringify({ traceId, tmpFile, engine: 'poppler' }));
     const t0 = Date.now();
 
     const text = await new Promise<string>((resolve, reject) => {
       let settled = false;
-
       const done = (err?: any, out?: string[] | string) => {
         if (settled) return;
         settled = true;
@@ -147,6 +162,7 @@ async function parseWithPdfTextExtract(ab: ArrayBuffer, traceId?: string): Promi
 
       try {
         console.log('[pdf] extract.invoked', JSON.stringify({ traceId, tmpFile }));
+        // 只传字符串路径，避免 paths/Buffer 签名差异
         extract(tmpFile, (err: any, out: string[] | string) => {
           clearTimeout(to);
           done(err, out);
@@ -173,6 +189,7 @@ async function parseWithPdfTextExtract(ab: ArrayBuffer, traceId?: string): Promi
   }
 }
 
+// 检测 pdftotext 是否存在，避免 ENOENT 导致进程崩溃
 async function canSpawnPdftotext(traceId?: string): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     try {
