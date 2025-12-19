@@ -1,4 +1,5 @@
 // api/src/server/routes/parse-resume-task.ts
+
 import { Hono } from 'hono';
 import { query } from '../lib/db.js';
 import { client, MODEL } from '../lib/llm.js';
@@ -66,6 +67,7 @@ export default r;
  * 采用 DeepSeek，可开启 stream，但我们把流聚合成完整文本再 JSON.parse。
  */
 async function processTask(taskId: string) {
+    console.log('[runtime]', { edge: (globalThis as any).EdgeRuntime, node: typeof process?.versions?.node });
   // 将任务标记为 processing
   await query(`update app.resume_tasks set status='processing' where id=$1 and status='pending'`, [taskId]);
 
@@ -167,3 +169,4 @@ function tryFixJson(s: string) {
   if (i >= 0 && j > i) return s.slice(i, j + 1);
   return s;
 }
+export const config = { runtime: 'nodejs' };
