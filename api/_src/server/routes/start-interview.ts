@@ -22,7 +22,7 @@ function maxFollowupsByDuration(mins: number) {
   return mins <= 15 ? 1 : 2
 }
 
-// 复用与 /parse-resume 相同的提示词，服务端内部直接解析（不用暴露调用）
+// 与 /parse-resume 相同提示词，用于服务端自动解析 PDF 文本
 async function parseResumeTextToSummary(text: string, interviewId?: string) {
   const sys =
     '你是资深招聘顾问，请将简历要点结构化提炼，输出 JSON：' +
@@ -72,13 +72,14 @@ r.post('/start-interview', async (c) => {
 
   let resumeSummary = payload.resumeSummary || null
 
-  // 如果未传 resumeSummary，但传了 resumeFileUrl，则自动从 Storage 下载 PDF → 提取文本 → 解析摘要
+  // 若仅传了 PDF 路径，自动 下载 → 提取文本 → LLM 摘要
   if (!resumeSummary && payload.resumeFileUrl) {
     try {
       const key = payload.resumeFileUrl
       const buf = await downloadFromStorage(STORAGE_BUCKET, key)
       const text = await pdfArrayBufferToText(buf)
-      const parsed = await parseResumeTextToSummary(text, undefined) // 修复这里
+      // 你之前传 undefined，这里依然允许；如需把审计与本次面试绑定，可在插入 interview 之后再调用并传 interviewId
+      const parsed = await parseResumeTextToSummary(text, undefined)
       if (parsed) {
         resumeSummary = parsed
       }
@@ -114,24 +115,18 @@ r.post('/start-interview', async (c) => {
     `JD:\n${payload.jdText || ''}\n` +
     `简历要点:\n${JSON.stringify(resumeSummary || {})}`
 
-  const t0 = Date.now()
-  let list: any[] = []
-  try {
+  // 生成函数 + 重试一次，且强约束 JSON 数组
+  async function generateOnce() {
+    const t0 = Date.now()
     const res = await client.chat.completions.create({
       model: MODEL,
       messages: [
         { role: 'system', content: sys },
-        { role: 'user', content: '请生成问题清单（5-8题），包含order_no, topic, text, intent, rubric_ref。' }
+        { role: 'user', content: '请生成问题清单（5-8题），每项包含 order_no, topic, text, intent, rubric_ref。只输出一个 JSON 数组，不要任何解释。' }
       ],
       temperature: 0.3
     })
-
     const latency = Date.now() - t0
-    try {
-      list = JSON.parse(res.choices[0]?.message?.content || '[]')
-    } catch {
-      list = []
-    }
 
     await auditLLM(query, {
       interviewId,
@@ -144,22 +139,41 @@ r.post('/start-interview', async (c) => {
       success: true,
       error: null
     })
+
+    let list: any[] = []
+    try {
+      const content = res.choices[0]?.message?.content || '[]'
+      list = JSON.parse(content)
+    } catch {
+      list = []
+    }
+    return list
+  }
+
+  let list: any[] = []
+  try {
+    list = await generateOnce()
+    if (!Array.isArray(list) || list.length === 0) {
+      // 重试一次（避免偶发解析失败）
+      list = await generateOnce()
+    }
   } catch (e: any) {
-    list = []
     await auditLLM(query, {
       interviewId,
       phase: 'planning',
       model: MODEL,
-      latencyMs: Date.now() - t0,
+      latencyMs: null,
       success: false,
       error: String(e?.message || e)
     })
+    list = []
   }
 
+  // 兜底：在 topic 前加标记，便于前端识别
   if (!Array.isArray(list) || list.length === 0) {
     list = Array.from({ length: 5 }).map((_, i) => ({
       order_no: i + 1,
-      topic: i === 0 ? '自我介绍' : '经历深挖',
+      topic: i === 0 ? '[兜底] 自我介绍' : '[兜底] 经历深挖',
       text:
         i === 0
           ? '请做一个简要自我介绍，并说明你为什么适合该岗位？'

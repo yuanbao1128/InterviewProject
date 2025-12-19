@@ -44,7 +44,7 @@ r.get('/next-question', async (c) => {
         model: MODEL,
         messages: [
           { role: 'system', content: prompt },
-          { role: 'user', content: `当前题目：${q.text}\n请给出追问候选（JSON：{followups: string[]}）。` }
+          { role: 'user', content: `当前题目：${q.text}\n请只返回 JSON：{"followups": string[]}，不要任何解释、前后缀。` }
         ],
         temperature: 0.4
       })
@@ -86,6 +86,8 @@ r.get('/next-question', async (c) => {
     }
   }
 
+  const isFallback = typeof q.topic === 'string' && q.topic.startsWith('[兜底]')
+
   return c.json({
     ok: true,
     data: {
@@ -94,7 +96,8 @@ r.get('/next-question', async (c) => {
         orderNo: q.order_no,
         topic: q.topic,
         text: q.text,
-        followups: q.followup_pool || []
+        followups: q.followup_pool || [],
+        isFallback
       },
       total
     }

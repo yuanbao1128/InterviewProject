@@ -23,7 +23,11 @@ if (PROVIDER === 'openai') {
 }
 
 if (!apiKey) {
-  throw new Error(`Missing API key for provider=${PROVIDER}`)
+  // 给出更友好的报错信息，便于 Vercel 日志定位
+  const hint = PROVIDER === 'deepseek'
+    ? '缺少 DEEPSEEK_API_KEY（可选：DEEPSEEK_BASE_URL）'
+    : '缺少 OPENAI_API_KEY（可选：OPENAI_BASE_URL）'
+  throw new Error(`Missing API key for provider=${PROVIDER}. ${hint}`)
 }
 
 const client = new OpenAI({ apiKey, baseURL })
