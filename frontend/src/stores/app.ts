@@ -1,3 +1,4 @@
+// src/stores/app.ts
 import { defineStore } from 'pinia';
 import axios from 'axios';
 
@@ -21,11 +22,14 @@ export const useApp = defineStore('app', {
     baseUrl: '',
     timerSec: 0,
     timerHandle: 0 as any,
-    resumeFileUrl: '' as string
+    resumeFileUrl: '' as string,
+    // 新增：结构化简历摘要
+    resumeSummary: null as any
   }),
   actions: {
     setResumeFileUrl(path: string) { this.resumeFileUrl = path || ''; },
     clearResumeFile() { this.resumeFileUrl = ''; },
+    setResumeSummary(sum: any) { this.resumeSummary = sum || null; },
 
     startTimer() {
       if (this.timerHandle) return;
@@ -62,6 +66,13 @@ export const useApp = defineStore('app', {
         style: payload.style,
         duration: payload.duration
       };
+
+      // 强制携带 resumeSummary（前端已前置完成），确保题目基于简历+JD 生成
+      if (this.resumeSummary) {
+        body.resumeSummary = this.resumeSummary;
+      }
+
+      // 保留文件路径（用于留档或后续操作）
       if (typeof this.resumeFileUrl === 'string' && this.resumeFileUrl.trim().length > 0) {
         body.resumeFileUrl = this.resumeFileUrl.trim();
       }

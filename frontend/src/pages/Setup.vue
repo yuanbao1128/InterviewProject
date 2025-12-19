@@ -1,9 +1,17 @@
+<!-- src/pages/Setup.vue -->
 <template>
   <div class="container">
     <!-- 步骤1：完善背景信息 -->
     <StepHeader :step="t.step" :title="t.header" />
     <div class="grid gap-4">
-      <UploadCard :t="t" @uploaded="onUploaded" />
+      <UploadCard :t="t" @uploaded="onUploaded" @parsed="onParsed" />
+
+      <div v-if="resumeReady" class="border rounded-lg p-3 bg-green-50 text-sm text-green-800">
+        简历已解析完成，可继续填写岗位信息并开始面试。
+      </div>
+      <div v-else class="border rounded-lg p-3 bg-yellow-50 text-sm text-yellow-800">
+        请先上传并完成简历解析。
+      </div>
 
       <label class="block">
         <div class="mb-1 font-medium">{{ t.company }}</div>
@@ -23,6 +31,15 @@
 2. 具备优秀的数据分析能力，能通过数据驱动业务迭代；
 3. 优秀的跨部门沟通协作能力。</textarea>
       </label>
+
+      <!-- 简历要点预览（来自 UploadCard 的 parsed 结果） -->
+      <div v-if="summaryPreview" class="border rounded-lg p-3 bg-gray-50">
+        <div class="font-medium mb-1">简历要点预览</div>
+        <div class="text-sm text-gray-700 whitespace-pre-line">
+          • {{ (summaryPreview.highlights || []).join('\n• ') || '—' }}
+        </div>
+        <div class="text-xs text-gray-500 mt-1">技能：{{ (summaryPreview.skills || []).join('、') || '—' }}</div>
+      </div>
     </div>
 
     <!-- 步骤2：定制面试风格 -->
@@ -32,12 +49,13 @@
     <div class="mt-6">
       <LoadingHint v-if="loading" />
       <button
-        :disabled="loading"
+        :disabled="loading || !resumeReady"
         class="inline-flex items-center rounded-md bg-gray-900 disabled:opacity-60 text-white px-5 py-2.5 hover:bg-black"
         @click="start"
       >
         {{ t.start }}
       </button>
+      <div v-if="!resumeReady" class="text-xs text-red-600 mt-2">需要简历解析完成后才能开始面试。</div>
     </div>
   </div>
 </template>
@@ -63,7 +81,15 @@ const jd = ref('');
 const style = ref<{duration:number, role:string, style:string}>({ duration:30, role:'业务负责人', style:'中性' });
 const loading = ref(false);
 
+// 新增：前端保存解析状态与预览
+const resumeReady = ref(false);
+const summaryPreview = ref<any>(null);
+
 function onUploaded(url: string){ fileUrl.value = url; }
+function onParsed(summary: any) {
+  summaryPreview.value = summary || null;
+  resumeReady.value = !!summary;
+}
 
 async function start(){
   try {
@@ -78,7 +104,6 @@ async function start(){
       duration: style.value.duration
     });
     await store.fetchQuestion();
-    // 关键修复：使用 vue-router 跳转到 /interview/:id
     await router.push({ path: `/interview/${store.interviewId}` });
   } finally {
     loading.value = false;

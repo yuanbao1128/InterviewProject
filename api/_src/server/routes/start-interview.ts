@@ -70,15 +70,15 @@ r.post('/start-interview', async (c) => {
   const body = await c.req.json()
   const payload = StartPayload.parse(body)
 
+  // 片段：在现有 start-interview.ts 顶部 resumeSummary 获取逻辑处添加保护
   let resumeSummary = payload.resumeSummary || null
 
-  // 若仅传了 PDF 路径，自动 下载 → 提取文本 → LLM 摘要
+  // 显式保护：若已有前端传入的摘要，跳过服务端 PDF 自动解析
   if (!resumeSummary && payload.resumeFileUrl) {
     try {
       const key = payload.resumeFileUrl
       const buf = await downloadFromStorage(STORAGE_BUCKET, key)
       const text = await pdfArrayBufferToText(buf)
-      // 你之前传 undefined，这里依然允许；如需把审计与本次面试绑定，可在插入 interview 之后再调用并传 interviewId
       const parsed = await parseResumeTextToSummary(text, undefined)
       if (parsed) {
         resumeSummary = parsed
