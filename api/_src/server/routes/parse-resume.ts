@@ -1,3 +1,4 @@
+// api/src/server/routes/parse-resume.ts
 console.log('[parse-resume] file loaded')
 
 import { Hono } from 'hono'
@@ -7,27 +8,29 @@ import { auditLLM } from '../lib/util.js'
 
 const r = new Hono()
 
-// 推断与规范化配置
+function sanitizeBase(raw?: string | null) {
+  const v = (raw || '').trim()
+  if (!v) return ''
+  return v.replace(/\/+$/, '').replace(/\/v1$/i, '')
+}
+
+// 与 llm.ts 保持一致的推断与变量来源
 function getProviderConfig() {
-  const explicit = (process.env.PROVIDER || '').toLowerCase() as 'deepseek' | 'openai' | ''
-  const base = process.env.OPENAI_BASE_URL?.trim() || '' // 约定用这个变量放 base，无论 DeepSeek 还是 OpenAI
-  const key = process.env.OPENAI_API_KEY || ''           // 约定用这个变量放 key，无论 DeepSeek 还是 OpenAI
+  const explicit = (process.env.LLM_PROVIDER || process.env.PROVIDER || '').toLowerCase() as 'deepseek' | 'openai' | ''
+  const baseRaw = sanitizeBase(process.env.OPENAI_BASE_URL) // 统一：OPENAI_BASE_URL
+  const key = process.env.OPENAI_API_KEY || ''              // 统一：OPENAI_API_KEY
 
-  // 自动推断
-  let provider: 'deepseek' | 'openai' = explicit || 'openai'
-  if (!explicit && base) {
-    if (/deepseek/i.test(base)) provider = 'deepseek'
-    if (/openai/i.test(base)) provider = 'openai'
-  }
+  let provider: 'deepseek' | 'openai' =
+    (explicit as any) ||
+    (baseRaw ? (/deepseek/i.test(baseRaw) ? 'deepseek' : /openai/i.test(baseRaw) ? 'openai' : 'openai') : 'openai')
 
-  // 默认 base
   const defaults = {
     openai: 'https://api.openai.com',
     deepseek: 'https://api.deepseek.com'
   } as const
-  const resolvedBase = base || defaults[provider]
+  const base = (baseRaw || defaults[provider]).replace(/\/+$/, '')
 
-  return { provider, baseURL: resolvedBase.replace(/\/+$/, ''), apiKey: key }
+  return { provider, baseURL: base, apiKey: key }
 }
 
 // 轻量超时（探针用）
@@ -77,16 +80,13 @@ r.post('/parse-resume', async (c) => {
   const size = text.length
   console.log('[parse-resume] start', { size, hasInterviewId: !!interviewId })
 
-  // 读取与推断 provider/base/key
   const { provider, baseURL, apiKey } = getProviderConfig()
   console.log('[parse-resume] config', { provider, baseURL: baseURL.replace(/^(https?:\/\/)/, '$1***.') })
 
-  // 连通性探针：当前配置
   try {
     const PROBE_TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS || 2500)
     await probe(`${provider}:base`, baseURL, apiKey, PROBE_TIMEOUT_MS)
 
-    // 对照探针（可选）：另一家官方端点，用于分辨是“上游网关问题”还是“区域链路问题”
     if (process.env.PROBE_COMPARE === '1') {
       if (provider === 'deepseek') {
         await probe('openai:official', 'https://api.openai.com', process.env.OPENAI_OFFICIAL_KEY || apiKey, PROBE_TIMEOUT_MS)
@@ -94,9 +94,7 @@ r.post('/parse-resume', async (c) => {
         await probe('deepseek:official', 'https://api.deepseek.com', process.env.DEEPSEEK_API_KEY || apiKey, PROBE_TIMEOUT_MS)
       }
     }
-  } catch {
-    // 探针异常不影响主流程
-  }
+  } catch {}
 
   const sys =
     '你是资深招聘顾问，请将简历要点结构化提炼，输出 JSON：' +
@@ -104,7 +102,6 @@ r.post('/parse-resume', async (c) => {
 
   const t0 = Date.now()
   try {
-    // 维持你现有的 client 和 MODEL（llm.ts 内可根据环境配置不同 provider 与 base）
     const res = await client.chat.completions.create({
       model: MODEL,
       messages: [
@@ -144,11 +141,8 @@ r.post('/parse-resume', async (c) => {
       model: MODEL,
       promptTokens: res.usage?.prompt_tokens ?? null,
       completionTokens: res.usage?.completion_tokens ?? null,
-      totalTokens: res.usage?.total_tokens ?? null,
-      latencyMs: latency,
-      success: true,
-      error: null
-    })
+      totalTokens: res.usage?.total_tokens ?? null
+    , latencyMs: latency, success: true, error: null })
 
     return c.json({ ok: true, data: parsed })
   } catch (e: any) {
@@ -167,7 +161,6 @@ r.post('/parse-resume', async (c) => {
       error: `${name}: ${msg}`
     })
 
-    // 错误映射
     if (name === 'AbortError') {
       return c.json({ ok: false, error: '上游模型调用超时（可能为网络/地域链路问题）' }, 504)
     }
