@@ -4,7 +4,13 @@
     <div class="font-medium mb-2">{{ t?.uploadTitle || '上传简历' }}</div>
 
     <div class="flex items-center gap-3">
-      <input ref="fileInput" class="hidden" type="file" accept=".pdf,.doc,.docx,.txt" @change="onFileChange" />
+      <input
+        ref="fileInput"
+        class="hidden"
+        type="file"
+        accept=".pdf,.doc,.docx,.txt"
+        @change="onFileChange"
+      />
       <button
         class="px-3 py-1.5 rounded-md bg-gray-900 text-white hover:bg-black disabled:opacity-60"
         :disabled="uploading"
@@ -39,10 +45,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 
-const props = defineProps<{ t?: any }>();
+const props = defineProps<{ t?: Record<string, any> }>();
 const emit = defineEmits<{
-  (e: 'uploaded', url: string): void
-  (e: 'parsed', payload: { taskId: string }): void
+  (e: 'uploaded', url: string): void;
+  (e: 'parsed', payload: { taskId: string }): void;
 }>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -51,8 +57,9 @@ const uploading = ref(false);
 
 type UIStatus = 'idle' | 'uploading' | 'task-started' | 'failed';
 const uiStatus = ref<UIStatus>('idle');
-const error = ref<string | null>(null);
+const error = ref<string>('');
 
+// 仅作展示
 const statusText = computed(() => {
   switch (uiStatus.value) {
     case 'idle': return '未开始';
@@ -64,7 +71,8 @@ const statusText = computed(() => {
 });
 const statusClass = computed(() => {
   return {
-    'bg-yellow-50 border-yellow-200 text-yellow-800': uiStatus.value === 'idle' || uiStatus.value === 'uploading',
+    'bg-yellow-50 border-yellow-200 text-yellow-800':
+      uiStatus.value === 'idle' || uiStatus.value === 'uploading',
     'bg-blue-50 border-blue-200 text-blue-800': uiStatus.value === 'task-started',
     'bg-red-50 border-red-200 text-red-800': uiStatus.value === 'failed',
   };
@@ -74,12 +82,12 @@ function triggerFile() {
   fileInput.value?.click();
 }
 
-// 保持与后端一致：直接传 filePath（即 storage 路径），后端在 parse-resume-task 会从存储读取
+// 从上传响应中提取 filePath（与后端统一：data.filePath）
 function selectFilePathFromUploadResp(resp: any): string {
-  // 常见字段
-  let url: string = resp?.url || resp?.fileUrl || resp?.location || resp?.path || '';
-  if (!url && typeof resp?.filePath === 'string') url = resp.filePath;
-  if (!url && typeof resp?.data?.filePath === 'string') url = resp.data.filePath;
+  if (resp?.data?.filePath && typeof resp.data.filePath === 'string') return resp.data.filePath;
+  if (resp?.filePath && typeof resp.filePath === 'string') return resp.filePath;
+  // 兼容其它常见字段（容错）
+  const url = resp?.url || resp?.fileUrl || resp?.location || resp?.path || '';
   return typeof url === 'string' ? url : '';
 }
 
@@ -92,18 +100,20 @@ async function onFileChange(e: Event) {
   try {
     uploading.value = true;
     uiStatus.value = 'uploading';
-    error.value = null;
+    error.value = '';
 
     // 1) 上传
     const form = new FormData();
     form.append('file', file);
 
     const uploadRes = await fetch('/api/upload', { method: 'POST', body: form });
-    // 只读取一次 body，避免 “body stream already read”
-    const uploadJson = await uploadRes.json().catch(async () => {
-      const txt = await uploadRes.text().catch(() => '');
-      throw new Error(`上传失败：${txt?.slice(0, 200) || '未知错误'}`);
-    });
+    let uploadJson: any = null;
+    try {
+      uploadJson = await uploadRes.json();
+    } catch {
+      // 不再对同一个 Response 进行 text() 读取，直接抛出统一错误，避免 body stream already read
+      throw new Error('上传失败：服务端未返回有效的 JSON');
+    }
     if (!uploadRes.ok || !uploadJson?.ok) {
       throw new Error(uploadJson?.error || '上传失败');
     }
@@ -111,19 +121,21 @@ async function onFileChange(e: Event) {
     const filePath = selectFilePathFromUploadResp(uploadJson);
     if (!filePath) throw new Error('上传成功但未返回文件路径 filePath');
 
-    // 通知父组件上传完成
     emit('uploaded', filePath);
 
-    // 2) 创建解析任务（注意路径：/api/parse-resume-task/start）
+    // 2) 创建解析任务
     const startRes = await fetch('/api/parse-resume-task/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resumeFileUrl: filePath })
+      body: JSON.stringify({ resumeFileUrl: filePath }),
     });
-    const startJson = await startRes.json().catch(async () => {
-      const txt = await startRes.text().catch(() => '');
-      throw new Error(`创建解析任务失败：${txt?.slice(0, 200) || '未知错误'}`);
-    });
+
+    let startJson: any = null;
+    try {
+      startJson = await startRes.json();
+    } catch {
+      throw new Error('创建解析任务失败：服务端未返回有效的 JSON');
+    }
 
     const taskId = startJson?.data?.taskId || startJson?.taskId;
     if (!startRes.ok || !startJson?.ok || !taskId) {

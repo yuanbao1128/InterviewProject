@@ -17,10 +17,9 @@ r.post('/upload', async (c) => {
       return c.json({ ok: false, error: '请使用 multipart/form-data 上传文件（字段名：file）' }, 400)
     }
 
-    // 2) 解析表单
-    const form = await c.req.parseBody()
-    const file = form['file']
-    const f = file as File | undefined
+    // 2) 解析表单（改为标准 formData，避免 parseBody 在不同运行时的类型差异）
+    const form = await c.req.formData()
+    const f = form.get('file') as File | null
 
     console.log('[upload] form parsed', {
       hasFile: !!f,
