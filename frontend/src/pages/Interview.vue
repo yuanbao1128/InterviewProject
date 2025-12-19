@@ -1,5 +1,5 @@
 <template>
-  <div class="container">
+  <div class="container min-h-screen">
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 my-4">
       <div class="text-gray-700">
         {{ store.role }} <span class="mx-1 text-gray-300">|</span> 风格: {{ store.style }} <span class="mx-1 text-gray-300">|</span> 状态: 提问中
@@ -35,7 +35,6 @@ const route = useRoute();
 const router = useRouter();
 
 onMounted(async () => {
-  // 允许用户直接访问 /interview/:id
   const idFromRoute = route.params.id as string | undefined;
   if (idFromRoute && idFromRoute !== store.interviewId) {
     store.interviewId = idFromRoute;
@@ -45,7 +44,6 @@ onMounted(async () => {
       await store.fetchQuestion();
     }
   } catch (e) {
-    // 若 interviewId 非法，回到设置页
     console.error(e);
     router.replace('/setup');
   }
@@ -56,7 +54,6 @@ async function onAnswered() {
 }
 async function onFinish() {
   await store.finish();
-  // 使用路由跳转至报告页
   router.push({ path: `/report/${store.interviewId}` });
 }
 </script>

@@ -18,33 +18,20 @@ export const useApp = defineStore('app', {
     style: '中性' as string,
     duration: 30 as number,
     startedAt: '' as string,
-    baseUrl: '', // 同域
+    baseUrl: '',
     timerSec: 0,
     timerHandle: 0 as any,
-
-    // 全局保存上传后的 Storage 对象键（私有路径）
     resumeFileUrl: '' as string
   }),
   actions: {
-    setResumeFileUrl(path: string) {
-      this.resumeFileUrl = path || '';
-    },
-    clearResumeFile() {
-      this.resumeFileUrl = '';
-    },
+    setResumeFileUrl(path: string) { this.resumeFileUrl = path || ''; },
+    clearResumeFile() { this.resumeFileUrl = ''; },
 
     startTimer() {
       if (this.timerHandle) return;
-      this.timerHandle = setInterval(() => {
-        this.timerSec += 1;
-      }, 1000);
+      this.timerHandle = setInterval(() => { this.timerSec += 1; }, 1000);
     },
-    stopTimer() {
-      if (this.timerHandle) {
-        clearInterval(this.timerHandle);
-        this.timerHandle = 0;
-      }
-    },
+    stopTimer() { if (this.timerHandle) { clearInterval(this.timerHandle); this.timerHandle = 0; } },
     timeDisplay() {
       const mm = String(Math.floor(this.timerSec / 60)).padStart(2, '0');
       const ss = String(this.timerSec % 60).padStart(2, '0');
@@ -56,17 +43,13 @@ export const useApp = defineStore('app', {
       form.append('file', file);
       const { data } = await axios.post(`${this.baseUrl}/api/upload`, form);
       if (!data?.ok) throw new Error(data?.error || '上传失败');
-
       const filePath = data?.data?.filePath as string;
-      if (!filePath || typeof filePath !== 'string') {
-        throw new Error('上传成功但未返回文件路径 filePath');
-      }
+      if (!filePath || typeof filePath !== 'string') throw new Error('上传成功但未返回文件路径 filePath');
       this.setResumeFileUrl(filePath);
       return filePath;
     },
 
     async start(payload: any) {
-      // 保存配置到本地状态
       this.role = payload.role;
       this.style = payload.style;
       this.duration = payload.duration;
@@ -120,6 +103,9 @@ export const useApp = defineStore('app', {
     },
 
     async getReport() {
+      if (!this.interviewId) {
+        throw new Error('缺少 interviewId');
+      }
       const { data } = await axios.get(`${this.baseUrl}/api/report`, {
         params: { interviewId: this.interviewId }
       });
