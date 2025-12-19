@@ -93,7 +93,7 @@ import StepHeader from '../components/StepHeader.vue';
 import UploadCard from '../components/UploadCard.vue';
 import StylePicker from '../components/StylePicker.vue';
 import LoadingHint from '../components/LoadingHint.vue';
-import { onBeforeUnmount, ref } from 'vue';
+import { onBeforeUnmount, ref, computed } from 'vue'; // 修复：补充 computed
 import { useApp } from '../stores/app';
 import { useRouter } from 'vue-router';
 import zh from '../i18n/zh.json';
@@ -152,9 +152,6 @@ function onUploaded(url: string){
 }
 
 // UploadCard 回调：服务端触发解析并在完成时回调 parsed
-// 现保留原行为，同时引入任务制兼容：
-// 1) 若 UploadCard 能直接拿到 parsed 结果，则直接设置 ready
-// 2) 若 UploadCard 只返回一个 taskId（可选改造），我们也支持
 function onParsed(payload: any) {
   // 情况 A：直接给出解析结果
   if (payload && typeof payload === 'object' && (payload.summary || payload.highlights || payload.skills || Array.isArray(payload?.projects))) {
@@ -164,7 +161,7 @@ function onParsed(payload: any) {
     parseError.value = null;
     return;
   }
-  // 情况 B：给出了 taskId（如果你已改造 UploadCard 发出 { taskId }）
+  // 情况 B：给出了 taskId
   if (payload && typeof payload === 'object' && payload.taskId) {
     parseTaskId.value = String(payload.taskId);
     parseStatus.value = 'pending';
@@ -172,18 +169,13 @@ function onParsed(payload: any) {
     startPolling(); // 开始轮询
     return;
   }
-  // 未知情况，保持原样
 }
 
-// 公开一个方法：当 UploadCard 内部开始服务器端异步解析时，可手动调用
-// emit('parsed', { taskId }) 来触发轮询。
-// 如果你还没改 UploadCard，也可以在这里添加一个显式的“探测接口”来根据 fileUrl 开一个任务。
+// 手动重新检测/创建任务
 async function retryProbe() {
   try {
     parseError.value = null;
     if (!parseTaskId.value) {
-      // 可选：尝试通过后端提供的“用已上传文件启动解析”的接口来创建任务
-      // 假设存在 POST /api/parse-resume/start
       if (!fileUrl.value) {
         parseError.value = '尚未上传简历文件';
         return;
@@ -249,7 +241,6 @@ async function checkStatus() {
     parseStatus.value = s;
 
     if (s === 'succeeded') {
-      // data.data 即解析结果
       const parsed = data.data || null;
       summaryPreview.value = parsed;
       resumeReady.value = !!parsed;
@@ -260,7 +251,6 @@ async function checkStatus() {
       stopPolling();
     }
   } catch (e: any) {
-    // 网络错误时保留轮询，但显示弱错误提示
     parseError.value = e?.message || '网络错误';
   }
 }
