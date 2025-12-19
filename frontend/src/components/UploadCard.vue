@@ -74,23 +74,33 @@ function triggerFile() {
   fileInput.value?.click();
 }
 
+function buildPublicUrlFromFilePath(filePath: string) {
+  // 如果你的静态文件是通过 /public 或对象存储直链提供，按需拼接
+  // 1) 若后端的 /api/upload 返回的文件可通过 /uploads/<filePath> 访问：
+  // return `/uploads/${filePath}`;
+  // 2) 若返回的是存储桶相对路径，需要你的后端在 /start 中识别 filePath，无需拼 URL
+  // 默认返回原始 filePath，让 /start 去识别
+  return filePath;
+}
+
 async function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement;
   if (!input.files || input.files.length === 0) return;
   const file = input.files[0];
   fileName.value = file.name;
 
-  // 1) 上传文件到后端
   try {
     uploading.value = true;
     uiStatus.value = 'uploading';
     error.value = null;
 
+    // 1) 上传
     const form = new FormData();
     form.append('file', file);
 
     const res = await fetch('/api/upload', { method: 'POST', body: form });
-    // 兼容文本错误响应，避免 JSON.parse 抛错
+
+    // 兼容文本错误响应
     let data: any = null;
     try {
       data = await res.json();
@@ -99,21 +109,38 @@ async function onFileChange(e: Event) {
       throw new Error(`上传失败：${txt?.slice(0, 200) || '未知错误'}`);
     }
     if (!res.ok || !data?.ok) {
+      // 你的示例里是 { ok: true, data: {...} }，也兼容 { ok: true, filePath: ... }
       throw new Error(data?.error || '上传失败');
     }
 
-    // 从响应里取文件地址（兼容不同后端字段）
-    const url = data.url || data.fileUrl || data.path || data.location || '';
-    if (!url) throw new Error('上传成功但未返回文件地址');
+    // 2) 取文件“可传递给后端”的地址/路径（兼容你的字段）
+    // 优先常见字段
+    let url: string =
+      data.url || data.fileUrl || data.location || data.path || '';
+
+    // 兼容你截图中的结构：{ ok: true, data: { filePath: 'resumes/..pdf', bucket: 'resumes', originalName: '...' } }
+    if (!url && data.data && typeof data.data.filePath === 'string') {
+      url = buildPublicUrlFromFilePath(data.data.filePath);
+    }
+
+    // 有些实现返回 { ok: true, filePath: 'resumes/..pdf' }
+    if (!url && typeof data.filePath === 'string') {
+      url = buildPublicUrlFromFilePath(data.filePath);
+    }
+
+    if (!url) {
+      console.warn('[UploadCard] unexpected upload response', data);
+      throw new Error('上传成功但未返回文件路径/URL（缺少 url/fileUrl/path/location/data.filePath）');
+    }
 
     // 通知父组件：文件已上传
     emit('uploaded', url);
 
-    // 2) 创建解析任务（新的任务制接口）
-    // 请确保你的后端已实现 POST /api/parse-resume/start
+    // 3) 创建解析任务（任务制接口）
     const startRes = await fetch('/api/parse-resume/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      // 后端可以同时接受 { fileUrl } 或 { filePath }，这里统一传 fileUrl 字段承载你返回的“路径或URL”
       body: JSON.stringify({ fileUrl: url })
     });
 
@@ -130,26 +157,12 @@ async function onFileChange(e: Event) {
     }
 
     uiStatus.value = 'task-started';
-
-    // 3) 把任务ID抛给父组件（Setup.vue 会开启轮询）
+    // 抛出 taskId，Setup.vue 会轮询 /status
     emit('parsed', { taskId: String(startData.taskId) });
   } catch (e: any) {
     console.error('[UploadCard] error', e);
     error.value = e?.message || '发生错误';
     uiStatus.value = 'failed';
-
-    // 兼容兜底：如后端暂未提供 /start 接口，可回退到“同步解析”以不阻断用户
-    // 但这会再次遇到 Vercel 10s 限制，强烈建议尽快完成任务制接口
-    // try {
-    //   const parseRes = await fetch('/api/parse-resume', {
-    //     method: 'POST',
-    //     headers: { 'Content-Type': 'application/json' },
-    //     body: JSON.stringify({ fileUrl: url })
-    //   });
-    //   const parsed = await parseRes.json();
-    //   if (!parseRes.ok || !parsed?.ok) throw new Error(parsed?.error || '解析失败');
-    //   emit('parsed', parsed.data);
-    // } catch {}
   } finally {
     uploading.value = false;
   }
