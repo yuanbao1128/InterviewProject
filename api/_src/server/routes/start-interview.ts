@@ -1,91 +1,41 @@
 // api/src/server/routes/start-interview.ts
-import { Hono } from 'hono'
-import { query } from '../lib/db.js'
-import { client, MODEL } from '../lib/llm.js'
-import { StartPayload } from '../lib/schema.js'
-import fs from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { auditLLM } from '../lib/util.js'
-import { STORAGE_BUCKET } from '../lib/supabase.js'
-import { downloadFromStorage, pdfArrayBufferToText } from '../lib/pdf.js'
+import { Hono } from 'hono';
+import { query } from '../lib/db.js';
+import { client, MODEL } from '../lib/llm.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { auditLLM } from '../lib/util.js';
 
-const r = new Hono()
+const r = new Hono();
 
 function resolvePrompt(...segments: string[]) {
-  const __filename = fileURLToPath(import.meta.url)
-  const __dirname = path.dirname(__filename)
-  return path.join(__dirname, '..', 'lib', 'prompts', ...segments)
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  return path.join(__dirname, '..', 'lib', 'prompts', ...segments);
 }
 
 function maxFollowupsByDuration(mins: number) {
-  return mins <= 15 ? 1 : 2
-}
-
-// 与 /parse-resume 相同提示词，用于服务端自动解析 PDF 文本
-async function parseResumeTextToSummary(text: string, interviewId?: string) {
-  const sys =
-    '你是资深招聘顾问，请将简历要点结构化提炼，输出 JSON：' +
-    '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}'
-  const t0 = Date.now()
-  try {
-    const res = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: text }
-      ],
-      temperature: 0.2
-    })
-    const latency = Date.now() - t0
-    const content = res.choices[0]?.message?.content || '{}'
-    const parsed = JSON.parse(content)
-
-    await auditLLM(query, {
-      interviewId: interviewId || null,
-      phase: 'parse',
-      model: MODEL,
-      promptTokens: res.usage?.prompt_tokens ?? null,
-      completionTokens: res.usage?.completion_tokens ?? null,
-      totalTokens: res.usage?.total_tokens ?? null,
-      latencyMs: latency,
-      success: true,
-      error: null
-    })
-    return parsed
-  } catch (e: any) {
-    await auditLLM(query, {
-      interviewId: interviewId || null,
-      phase: 'parse',
-      model: MODEL,
-      latencyMs: null,
-      success: false,
-      error: String(e?.message || e)
-    })
-    return null
-  }
+  return mins <= 15 ? 1 : 2;
 }
 
 r.post('/start-interview', async (c) => {
-  const body = await c.req.json()
-  const payload = StartPayload.parse(body)
+  const body = await c.req.json();
+  // 强制要求 resumeSummary（由前端任务完成后传入）
+  const payload = {
+    targetCompany: body.targetCompany ?? null,
+    targetRole: body.targetRole ?? null,
+    jdText: body.jdText ?? null,
+    role: body.role,
+    style: body.style,
+    duration: body.duration,
+    resumeFileUrl: body.resumeFileUrl ?? null,
+    resumeSummary: body.resumeSummary ?? null
+  };
 
-  // 片段：在现有 start-interview.ts 顶部 resumeSummary 获取逻辑处添加保护
-  let resumeSummary = payload.resumeSummary || null
-
-  // 显式保护：若已有前端传入的摘要，跳过服务端 PDF 自动解析
-  if (!resumeSummary && payload.resumeFileUrl) {
-    try {
-      const key = payload.resumeFileUrl
-      const buf = await downloadFromStorage(STORAGE_BUCKET, key)
-      const text = await pdfArrayBufferToText(buf)
-      const parsed = await parseResumeTextToSummary(text, undefined)
-      if (parsed) {
-        resumeSummary = parsed
-      }
-    } catch (e: any) {
-      console.warn('[start-interview] auto-parse resume failed:', e?.message || e)
-    }
+  // 如果没有 resumeSummary，直接返回 409，让前端提示“简历解析中”
+  if (!payload.resumeSummary) {
+    return c.json({ ok: false, error: '简历尚未解析完成', code: 'RESUME_NOT_READY' }, 409);
   }
 
   const { rows: ir } = await query<{ id: string }>(
@@ -103,21 +53,20 @@ r.post('/start-interview', async (c) => {
       payload.targetRole || null,
       payload.jdText || null,
       payload.resumeFileUrl || null,
-      resumeSummary ? JSON.stringify(resumeSummary) : null
+      JSON.stringify(payload.resumeSummary)
     ]
-  )
-  const interviewId = ir[0].id
+  );
+  const interviewId = ir[0].id;
 
-  const planningPromptPath = resolvePrompt('planning.md')
-  const planningPrompt = await fs.readFile(planningPromptPath, 'utf-8')
+  const planningPromptPath = resolvePrompt('planning.md');
+  const planningPrompt = await fs.readFile(planningPromptPath, 'utf-8');
   const sys =
     `${planningPrompt}\n请严格输出 JSON。上下文：\n` +
     `JD:\n${payload.jdText || ''}\n` +
-    `简历要点:\n${JSON.stringify(resumeSummary || {})}`
+    `简历要点:\n${JSON.stringify(payload.resumeSummary || {})}`;
 
-  // 生成函数 + 重试一次，且强约束 JSON 数组
   async function generateOnce() {
-    const t0 = Date.now()
+    const t0 = Date.now();
     const res = await client.chat.completions.create({
       model: MODEL,
       messages: [
@@ -125,8 +74,8 @@ r.post('/start-interview', async (c) => {
         { role: 'user', content: '请生成问题清单（5-8题），每项包含 order_no, topic, text, intent, rubric_ref。只输出一个 JSON 数组，不要任何解释。' }
       ],
       temperature: 0.3
-    })
-    const latency = Date.now() - t0
+    });
+    const latency = Date.now() - t0;
 
     await auditLLM(query, {
       interviewId,
@@ -138,24 +87,23 @@ r.post('/start-interview', async (c) => {
       latencyMs: latency,
       success: true,
       error: null
-    })
+    });
 
-    let list: any[] = []
+    let list: any[] = [];
     try {
-      const content = res.choices[0]?.message?.content || '[]'
-      list = JSON.parse(content)
+      const content = res.choices[0]?.message?.content || '[]';
+      list = JSON.parse(content);
     } catch {
-      list = []
+      list = [];
     }
-    return list
+    return list;
   }
 
-  let list: any[] = []
+  let list: any[] = [];
   try {
-    list = await generateOnce()
+    list = await generateOnce();
     if (!Array.isArray(list) || list.length === 0) {
-      // 重试一次（避免偶发解析失败）
-      list = await generateOnce()
+      list = await generateOnce();
     }
   } catch (e: any) {
     await auditLLM(query, {
@@ -165,22 +113,20 @@ r.post('/start-interview', async (c) => {
       latencyMs: null,
       success: false,
       error: String(e?.message || e)
-    })
-    list = []
+    });
+    list = [];
   }
 
-  // 兜底：在 topic 前加标记，便于前端识别
   if (!Array.isArray(list) || list.length === 0) {
     list = Array.from({ length: 5 }).map((_, i) => ({
       order_no: i + 1,
       topic: i === 0 ? '[兜底] 自我介绍' : '[兜底] 经历深挖',
-      text:
-        i === 0
-          ? '请做一个简要自我介绍，并说明你为什么适合该岗位？'
-          : `请详细说明一个你主导的项目（第${i}个），你的目标、动作、结果与复盘。`,
+      text: i === 0
+        ? '请做一个简要自我介绍，并说明你为什么适合该岗位？'
+        : `请详细说明一个你主导的项目（第${i}个），你的目标、动作、结果与复盘。`,
       intent: '基础面',
       rubric_ref: 'default'
-    }))
+    }));
   }
 
   for (const q of list) {
@@ -188,7 +134,7 @@ r.post('/start-interview', async (c) => {
       `insert into app.questions (interview_id, order_no, topic, text, intent, rubric_ref)
        values ($1, $2, $3, $4, $5, $6)`,
       [interviewId, q.order_no, q.topic, q.text, q.intent || null, q.rubric_ref || null]
-    )
+    );
   }
 
   await query(
@@ -205,9 +151,9 @@ r.post('/start-interview', async (c) => {
       }),
       interviewId
     ]
-  )
+  );
 
-  return c.json({ ok: true, data: { interviewId, total: list.length } })
-})
+  return c.json({ ok: true, data: { interviewId, total: list.length } });
+});
 
-export default r
+export default r;

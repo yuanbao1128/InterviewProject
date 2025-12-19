@@ -28,6 +28,7 @@ import submitAnswer from './_src/server/routes/submit-answer.js'
 import finish from './_src/server/routes/finish.js'
 import report from './_src/server/routes/report.js'
 import metrics from './_src/server/routes/metrics.js'
+import parseResumeTask from './_src/server/routes/parse-resume-task.js';
 
 const app = new Hono()
 
@@ -77,6 +78,7 @@ app.route('/api', submitAnswer)
 app.route('/api', finish)
 app.route('/api', report)
 app.route('/api', metrics)
+app.route('/api', parseResumeTask);
 
 // 导出给 Vercel 适配器
 export const GET = app.fetch

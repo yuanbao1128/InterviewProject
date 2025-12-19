@@ -8,6 +8,8 @@ type ProgressState = {
   followups_left?: number;
 };
 
+type TaskStatus = 'idle'|'pending'|'processing'|'done'|'error';
+
 export const useApp = defineStore('app', {
   state: () => ({
     interviewId: '' as string,
@@ -23,9 +25,18 @@ export const useApp = defineStore('app', {
     timerSec: 0,
     timerHandle: 0 as any,
     resumeFileUrl: '' as string,
-    // 新增：结构化简历摘要
-    resumeSummary: null as any
+    // 简历解析结果（必须有）
+    resumeSummary: null as any,
+    // 任务态
+    resumeTaskId: '' as string,
+    resumeTaskStatus: 'idle' as TaskStatus,
+    resumeTaskError: '' as string
   }),
+  getters: {
+    canStart(state) {
+      return !!state.resumeSummary && state.resumeTaskStatus === 'done';
+    }
+  },
   actions: {
     setResumeFileUrl(path: string) { this.resumeFileUrl = path || ''; },
     clearResumeFile() { this.resumeFileUrl = ''; },
@@ -53,7 +64,64 @@ export const useApp = defineStore('app', {
       return filePath;
     },
 
+    // 开始一个“简历解析任务”
+    async startResumeParseTask() {
+      if (!this.resumeFileUrl) throw new Error('请先上传简历');
+      this.resumeTaskStatus = 'pending';
+      this.resumeTaskError = '';
+      this.resumeTaskId = '';
+      this.resumeSummary = null;
+
+      const { data } = await axios.post(`${this.baseUrl}/api/parse-resume-task/start`, {
+        resumeFileUrl: this.resumeFileUrl
+      });
+      if (!data?.ok) throw new Error(data?.error || '任务创建失败');
+
+      this.resumeTaskId = data.data.taskId;
+      this.resumeTaskStatus = 'processing';
+    },
+
+    // 轮询任务状态（返回 true 表示已结束）
+    async pollResumeTaskOnce() {
+      if (!this.resumeTaskId) return false;
+      const { data } = await axios.get(`${this.baseUrl}/api/parse-resume-task/status`, {
+        params: { taskId: this.resumeTaskId }
+      });
+      if (!data?.ok) throw new Error(data?.error || '查询失败');
+
+      const st = data.data.status as TaskStatus;
+      this.resumeTaskStatus = st;
+
+      if (st === 'done') {
+        this.resumeSummary = data.data.result || null;
+        return true;
+      }
+      if (st === 'error') {
+        this.resumeTaskError = data.data.error || '解析失败';
+        return true;
+      }
+      return false;
+    },
+
+    // 连续轮询直到完成或超时
+    async waitResumeTaskUntilDone({ intervalMs = 1500, maxWaitMs = 120000 } = {}) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < maxWaitMs) {
+        const finished = await this.pollResumeTaskOnce();
+        if (finished) return this.resumeTaskStatus === 'done';
+        await new Promise(r => setTimeout(r, intervalMs));
+      }
+      this.resumeTaskError = '等待超时，请稍后重试';
+      this.resumeTaskStatus = 'error';
+      return false;
+    },
+
     async start(payload: any) {
+      // 必须有解析结果才允许启动
+      if (!this.resumeSummary || this.resumeTaskStatus !== 'done') {
+        throw new Error('简历正在解析中，请稍候再开始');
+      }
+
       this.role = payload.role;
       this.style = payload.style;
       this.duration = payload.duration;
@@ -64,15 +132,11 @@ export const useApp = defineStore('app', {
         jdText: payload.jdText ?? null,
         role: payload.role,
         style: payload.style,
-        duration: payload.duration
+        duration: payload.duration,
+        resumeSummary: this.resumeSummary
       };
 
-      // 强制携带 resumeSummary（前端已前置完成），确保题目基于简历+JD 生成
-      if (this.resumeSummary) {
-        body.resumeSummary = this.resumeSummary;
-      }
-
-      // 保留文件路径（用于留档或后续操作）
+      // 保留文件路径
       if (typeof this.resumeFileUrl === 'string' && this.resumeFileUrl.trim().length > 0) {
         body.resumeFileUrl = this.resumeFileUrl.trim();
       }
