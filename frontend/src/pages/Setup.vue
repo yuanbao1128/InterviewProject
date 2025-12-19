@@ -231,7 +231,7 @@ async function checkStatus() {
     }
   }
   try {
-    const url = `/api/parse-resume-status/status?taskId=${encodeURIComponent(parseTaskId.value)}`;
+    const url = `/api/parse-resume-tasks/status?taskId=${encodeURIComponent(parseTaskId.value)}`;
     const res = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }, cache: 'no-store' });
     const data = await res.json();
     if (!res.ok || !data?.ok) {
