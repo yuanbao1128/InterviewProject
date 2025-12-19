@@ -1,21 +1,29 @@
-// api/src/server/lib/pdf.ts
-import extractOrig = require('pdf-text-extract');
+import { createClient } from '@supabase/supabase-js';
 
-type ExtractFn = typeof extractOrig;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-// 包一层，兼容 default / cjs 导出
-async function getExtractor(): Promise<ExtractFn> {
-  const mod: any = await import('pdf-text-extract');
-  return (mod.default || mod) as ExtractFn;
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
+});
+
+export async function downloadFromStorage(bucket: string, path: string): Promise<ArrayBuffer> {
+  const { data, error } = await supabase.storage.from(bucket).download(path);
+  if (error) throw new Error(`Storage download failed: ${error.message}`);
+  return await data.arrayBuffer();
 }
 
 export async function pdfArrayBufferToText(buf: ArrayBuffer): Promise<string> {
-  const extract = await getExtractor();
+  const extract: any = (await import('pdf-text-extract')).default ?? (await import('pdf-text-extract'));
   const buffer = Buffer.from(buf);
 
-  const pages = await new Promise<string[]>((resolve, reject) => {
-    // 显式指明是 Buffer 输入，避免被当作路径
-    (extract as any)({ input: buffer, type: 'buffer', splitPages: true }, (err: any, out: string[] | string) => {
+  const pages: string[] = await new Promise((resolve, reject) => {
+    // 明确 Buffer 输入，避免被当作文件路径
+    extract(buffer, { splitPages: true }, (err: any, out: string[] | string) => {
       if (err) return reject(err);
       resolve(Array.isArray(out) ? out : [out]);
     });
@@ -26,9 +34,4 @@ export async function pdfArrayBufferToText(buf: ArrayBuffer): Promise<string> {
 
 function normalizeText(s: string) {
   return s.replace(/\u0000/g, '').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
-}
-function toNodeBuffer(x: ArrayBuffer | Uint8Array | Buffer) {
-  if (Buffer.isBuffer(x)) return x;
-  if (x instanceof Uint8Array) return Buffer.from(x.buffer, x.byteOffset, x.byteLength);
-  return Buffer.from(x as ArrayBuffer);
 }
