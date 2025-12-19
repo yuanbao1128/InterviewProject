@@ -27,32 +27,35 @@ async function getExtractor(): Promise<any> {
   return mod?.default ?? mod;
 }
 
-// 方案：写入临时文件，再用路径交给 pdf-text-extract（最稳定）
+// 方案：写入临时文件 → 以“字符串路径签名”调用（避免任何对象/paths 歧义）
 export async function pdfArrayBufferToText(ab: ArrayBuffer): Promise<string> {
   const extract = await getExtractor();
 
-  // 1) 在系统临时目录创建独立文件夹
+  // 1) 临时目录与文件
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdfx-'));
   const tmpFile = path.join(tmpDir, 'input.pdf');
 
   try {
-    // 2) 写入临时文件
+    // 2) 落盘
     await fs.writeFile(tmpFile, Buffer.from(ab));
 
-    // 3) 以“路径”方式调用（该库最稳定的用法）
+    // 3) 只传“字符串路径”，不用对象/数组，避免 paths[0] 类型误判
     const pages: string[] = await new Promise((resolve, reject) => {
       const cb = (err: any, out: string[] | string) => {
         if (err) return reject(err);
         resolve(Array.isArray(out) ? out : [out]);
       };
-      // 二选一都可以（建议用对象形式，方便加选项）
-      // extract(tmpFile, cb);
-      extract({ paths: [tmpFile], splitPages: true }, cb);
+      try {
+        // 关键：这里仅传字符串
+        extract(tmpFile, cb);
+      } catch (e) {
+        reject(e);
+      }
     });
 
     return normalizeText(pages.join('\n'));
   } finally {
-    // 4) 清理临时文件与目录（忽略清理错误）
+    // 4) 清理
     try { await fs.unlink(tmpFile); } catch {}
     try { await fs.rmdir(tmpDir); } catch {}
   }

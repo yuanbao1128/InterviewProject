@@ -1,11 +1,13 @@
 declare module 'pdf-text-extract' {
   type Callback = (err: any, pages: string[] | string) => void;
-  interface Options {
-    splitPages?: boolean; // 默认 true
-    // 其余选项用 any 兜底
-    [k: string]: any;
-  }
-  // 该库同时支持 (filePath, options?, cb) 与 (buffer, options?, cb)
-  function extract(input: string | Buffer, options: Options | Callback, cb?: Callback): void;
+
+  // 有的实现仅支持 filePath 或 filePaths 数组；不保证支持 Buffer 或对象
+  function extract(filePath: string, cb: Callback): void;
+  function extract(filePaths: string[], cb: Callback): void;
+
+  // 某些分叉实现可能支持 (filePath, options, cb)，这里做个兼容声明：
+  function extract(filePath: string, options: any, cb: Callback): void;
+  function extract(filePaths: string[], options: any, cb: Callback): void;
+
   export = extract;
 }
