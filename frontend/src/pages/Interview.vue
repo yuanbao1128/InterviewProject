@@ -23,20 +23,40 @@
     <div class="text-xs text-gray-500 mt-1">AI 可能会产生不准确的信息</div>
   </div>
 </template>
+
 <script setup lang="ts">
 import { onMounted } from 'vue';
 import { useApp } from '../stores/app';
+import { useRoute, useRouter } from 'vue-router';
 import ChatPanel from '../components/ChatPanel.vue';
 
 const store = useApp();
+const route = useRoute();
+const router = useRouter();
+
 onMounted(async () => {
-  if (!store.question) await store.fetchQuestion();
+  // 允许用户直接访问 /interview/:id
+  const idFromRoute = route.params.id as string | undefined;
+  if (idFromRoute && idFromRoute !== store.interviewId) {
+    store.interviewId = idFromRoute;
+  }
+  try {
+    if (!store.question) {
+      await store.fetchQuestion();
+    }
+  } catch (e) {
+    // 若 interviewId 非法，回到设置页
+    console.error(e);
+    router.replace('/setup');
+  }
 });
+
 async function onAnswered() {
   await store.fetchQuestion();
 }
 async function onFinish() {
   await store.finish();
-  window.location.assign(`/report/${store.interviewId}`);
+  // 使用路由跳转至报告页
+  router.push({ path: `/report/${store.interviewId}` });
 }
 </script>

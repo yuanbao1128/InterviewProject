@@ -22,12 +22,10 @@ export const useApp = defineStore('app', {
     timerSec: 0,
     timerHandle: 0 as any,
 
-    // 新增：全局保存上传后的 Storage 对象键（私有路径）
-    // 例如：resumes/resume_1766xxxx.pdf 或 upload 接口返回的 data.filePath
+    // 全局保存上传后的 Storage 对象键（私有路径）
     resumeFileUrl: '' as string
   }),
   actions: {
-    // 新增：设置与清空 resumeFileUrl
     setResumeFileUrl(path: string) {
       this.resumeFileUrl = path || '';
     },
@@ -53,32 +51,26 @@ export const useApp = defineStore('app', {
       return `${mm}:${ss}`;
     },
 
-    // 修改：上传后端返回 data.filePath，并写入全局 resumeFileUrl
     async upload(file: File) {
       const form = new FormData();
       form.append('file', file);
       const { data } = await axios.post(`${this.baseUrl}/api/upload`, form);
       if (!data?.ok) throw new Error(data?.error || '上传失败');
 
-      // 后端 upload.ts 返回的是 data.filePath（私有路径），不是 fileUrl
       const filePath = data?.data?.filePath as string;
       if (!filePath || typeof filePath !== 'string') {
         throw new Error('上传成功但未返回文件路径 filePath');
       }
-
-      // 写入全局状态，供 start() 使用
       this.setResumeFileUrl(filePath);
       return filePath;
     },
 
-    // 修改：仅在 resumeFileUrl 为非空字符串时才发送该字段，避免传 null
     async start(payload: any) {
-      // 保存配置到本地状态，便于展示
+      // 保存配置到本地状态
       this.role = payload.role;
       this.style = payload.style;
       this.duration = payload.duration;
 
-      // 组装 body。注意：不要传 null 的 resumeFileUrl
       const body: any = {
         targetCompany: payload.targetCompany ?? null,
         targetRole: payload.targetRole ?? null,
@@ -87,8 +79,6 @@ export const useApp = defineStore('app', {
         style: payload.style,
         duration: payload.duration
       };
-
-      // 仅当全局 resumeFileUrl 为非空字符串时，才加入请求体
       if (typeof this.resumeFileUrl === 'string' && this.resumeFileUrl.trim().length > 0) {
         body.resumeFileUrl = this.resumeFileUrl.trim();
       }
@@ -105,11 +95,10 @@ export const useApp = defineStore('app', {
 
     async fetchQuestion() {
       const { data } = await axios.get(`${this.baseUrl}/api/next-question`, {
-        params: { interviewId: this.interviewId /* 后端会优先用进度 */ }
+        params: { interviewId: this.interviewId }
       });
       if (!data?.ok) throw new Error(data?.error || '获取题目失败');
       this.question = data.data.question;
-      // 同步当前题序（后端以progress_state为准）
       this.current = data.data.question.orderNo;
       this.total = data.data.total || this.total;
     },
@@ -123,7 +112,6 @@ export const useApp = defineStore('app', {
       };
       const { data } = await axios.post(`${this.baseUrl}/api/submit-answer`, payload);
       if (!data?.ok) throw new Error(data?.error || '提交失败');
-      // 是否进入下一题由后端决定；前端随后调用 fetchQuestion 刷新
     },
 
     async finish() {

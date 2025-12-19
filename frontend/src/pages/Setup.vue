@@ -49,10 +49,12 @@ import StylePicker from '../components/StylePicker.vue';
 import LoadingHint from '../components/LoadingHint.vue';
 import { ref } from 'vue';
 import { useApp } from '../stores/app';
+import { useRouter } from 'vue-router';
 import zh from '../i18n/zh.json';
 
 const t = zh.setup;
 const store = useApp();
+const router = useRouter();
 
 const fileUrl = ref('');
 const company = ref('');
@@ -64,19 +66,22 @@ const loading = ref(false);
 function onUploaded(url: string){ fileUrl.value = url; }
 
 async function start(){
-  loading.value = true;
-  await store.start({
-    targetCompany: company.value,
-    targetRole: role.value,
-    jdText: jd.value,
-    resumeFileUrl: fileUrl.value || null,
-    role: style.value.role,
-    style: style.value.style,
-    duration: style.value.duration
-  });
-  await store.fetchQuestion();
-  loading.value = false;
-  history.pushState({}, '', `/interview/${store.interviewId}`);
-  window.location.assign(`/interview/${store.interviewId}`);
+  try {
+    loading.value = true;
+    await store.start({
+      targetCompany: company.value,
+      targetRole: role.value,
+      jdText: jd.value,
+      resumeFileUrl: fileUrl.value || null,
+      role: style.value.role,
+      style: style.value.style,
+      duration: style.value.duration
+    });
+    await store.fetchQuestion();
+    // 关键修复：使用 vue-router 跳转到 /interview/:id
+    await router.push({ path: `/interview/${store.interviewId}` });
+  } finally {
+    loading.value = false;
+  }
 }
 </script>

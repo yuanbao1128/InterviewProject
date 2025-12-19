@@ -6,10 +6,18 @@
       <p class="text-gray-500 mt-1">针对转岗与跨行业求职者，提供接近真实的面试演练与专业反馈。</p>
       <button
         class="mt-8 inline-flex items-center rounded-md bg-gray-900 hover:bg-black text-white px-5 py-3"
-        @click="$router.push('/setup')"
+        @click="goSetup"
       >
         开始练习
       </button>
     </div>
   </div>
 </template>
+
+<script setup lang="ts">
+import { useRouter } from 'vue-router';
+const router = useRouter();
+function goSetup() {
+  router.push('/setup');
+}
+</script>
