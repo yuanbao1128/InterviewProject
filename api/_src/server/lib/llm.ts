@@ -26,6 +26,8 @@ if (PROVIDER === 'openai') {
   throw new Error(`Unknown LLM provider: ${PROVIDER}`)
 }
 
+console.log('[llm] init', { provider: PROVIDER, baseURL, timeoutMs: UPSTREAM_TIMEOUT_MS })
+
 if (!apiKey) {
   // 给出更友好的报错信息，便于 Vercel 日志定位
   const hint = PROVIDER === 'deepseek'
@@ -36,6 +38,7 @@ if (!apiKey) {
 
 // 自定义带超时与重试的 fetch；OpenAI SDK 支持传入自定义 fetch
 function createTimedFetch(timeoutMs: number, maxRetries: number) {
+    console.log('[llm.fetch] called')
   return async (url: string, init?: RequestInit) => {
     let lastErr: any
     for (let attempt = 1; attempt <= maxRetries; attempt++) {

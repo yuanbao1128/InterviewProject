@@ -1,3 +1,4 @@
+console.log('[parse-resume] file loaded')
 import { Hono } from 'hono'
 import { client, MODEL } from '../lib/llm.js'
 import { query } from '../lib/db.js'
@@ -7,6 +8,7 @@ const r = new Hono()
 
 // 简历解析（纯文本/markdown 摘要），用于问题生成上下文
 r.post('/parse-resume', async (c) => {
+    console.log('[parse-resume] route entered')
   const { text, interviewId } = await c.req.json()
   if (!text || typeof text !== 'string') return c.json({ ok: false, error: '缺少简历文本' }, 400)
 
