@@ -46,9 +46,12 @@ export async function pdfArrayBufferToText(ab: ArrayBuffer): Promise<string> {
         resolve(Array.isArray(out) ? out : [out]);
       };
       try {
+          console.log('[pdf] extract.invoked', { tmpFile });
         // 关键：这里仅传字符串
         extract(tmpFile, cb);
+        console.log('[pdf] extract.cb.ok', { err: String(err) });
       } catch (e) {
+          console.log('[pdf] extract.cb.error', { err: String(err) });
         reject(e);
       }
     });

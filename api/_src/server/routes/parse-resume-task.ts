@@ -84,8 +84,12 @@ async function processTask(taskId: string) {
   try {
     if (!rawText && fileUrl) {
       // 从 Supabase Storage 下载并转文本
+      console.log('[resume-task] download.start', { taskId, fileUrl });
       const buf = await downloadFromStorage(STORAGE_BUCKET, fileUrl);
+      console.log('[resume-task] download.ok', { taskId, size: buf.byteLength });
+      console.log('[resume-task] extract.start', { taskId });
       rawText = await pdfArrayBufferToText(buf);
+      console.log('[resume-task] extract.ok', { taskId, chars: rawText.length });
     }
     if (!rawText || rawText.trim().length === 0) {
       throw new Error('未获取到简历文本');
@@ -108,6 +112,7 @@ async function processTask(taskId: string) {
     // });
 
     // 方式2：流式（DeepSeek 支持），聚合内容
+    console.log('[resume-task] llm.start', { taskId, model: MODEL });
     const stream = await client.chat.completions.create({
       model: MODEL,
       messages: [
@@ -117,6 +122,7 @@ async function processTask(taskId: string) {
       temperature: 0.2,
       stream: true
     });
+    console.log('[resume-task] llm.stream.end', { taskId, bytes: (content||'').length });
 
     let content = '';
     for await (const chunk of stream) {
