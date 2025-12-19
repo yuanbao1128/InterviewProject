@@ -17,15 +17,15 @@ r.post('/upload', async (c) => {
       return c.json({ ok: false, error: '请使用 multipart/form-data 上传文件（字段名：file）' }, 400)
     }
 
-    // 2) 解析表单（使用标准 formData，避免 parseBody 在不同运行时下的差异）
-    const form = await c.req.formData()
-    const f = form.get('file') as File | null
+    // 2) 解析表单
+    const form = await c.req.parseBody()
+    const file = form['file']
+    const f = file as File | undefined
 
     console.log('[upload] form parsed', {
       hasFile: !!f,
       name: f?.name,
       type: (f as any)?.type,
-      // File 在某些运行时没有 size 字段，这里容错打印
       size: (f as any)?.size
     })
 
@@ -58,7 +58,6 @@ r.post('/upload', async (c) => {
     console.log('[upload] stored', { path: filePath })
 
     // 5) 返回私有路径。若你需要前端可访问，应改为生成签名 URL 或使用公开桶。
-    // 结构保持与前端约定一致：{ ok:true, data:{ filePath } }
     return c.json({ ok: true, data: { filePath, bucket: STORAGE_BUCKET, originalName: origName } })
   } catch (e: any) {
     console.error('[upload] error', e)
