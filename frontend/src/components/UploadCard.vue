@@ -4,11 +4,17 @@
     <div class="font-medium mb-2">{{ t?.uploadTitle || '上传简历' }}</div>
 
     <div class="flex items-center gap-3">
-      <input ref="fileInput" class="hidden" type="file" accept=".pdf,.doc,.docx,.txt" @change="onFileChange" />
+      <input
+        ref="fileInput"
+        class="hidden"
+        type="file"
+        accept=".pdf,.doc,.docx,.txt"
+        @change="onFileChange"
+      />
       <button
         class="px-3 py-1.5 rounded-md bg-gray-900 text-white hover:bg-black disabled:opacity-60"
-        :disabled="uploading"
-        @click="triggerFile"
+        :disabled="busy"
+        @click="fileInput?.click()"
         type="button"
       >
         选择文件
@@ -24,7 +30,7 @@
       <div class="p-2 rounded border" :class="statusClass">
         <div class="flex items-center justify-between">
           <span>
-            上传后系统会自动创建“解析任务”。若网络波动导致中断，可在 Setup 页面点击“重新检测”继续轮询解析状态。
+            上传后系统会自动创建“解析任务”。若网络波动中断，可在 Setup 页面点击“重新检测”继续轮询解析状态。
           </span>
           <span>状态：<b>{{ statusText }}</b></span>
         </div>
@@ -38,106 +44,70 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue';
+import { storeToRefs } from 'pinia';
+import { useApp } from '@/stores/app';
 
 const props = defineProps<{ t?: any }>();
-const emit = defineEmits<{
-  (e: 'uploaded', url: string): void
-  (e: 'parsed', payload: { taskId: string }): void
-}>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const fileName = ref('');
-const uploading = ref(false);
+const localPhase = ref<'idle' | 'uploading' | 'starting-task'>('idle');
+const error = ref<string>('');
 
-type UIStatus = 'idle' | 'uploading' | 'task-started' | 'failed';
-const uiStatus = ref<UIStatus>('idle');
-const error = ref<string | null>(null);
+const app = useApp();
+const { resumeTaskStatus, resumeTaskError } = storeToRefs(app);
+
+const busy = computed(() => localPhase.value !== 'idle' || resumeTaskStatus.value === 'processing' || resumeTaskStatus.value === 'pending');
 
 const statusText = computed(() => {
-  switch (uiStatus.value) {
-    case 'idle': return '未开始';
-    case 'uploading': return '上传中…';
-    case 'task-started': return '已创建解析任务';
-    case 'failed': return '失败';
-    default: return '—';
+  if (error.value) return '失败';
+  switch (true) {
+    case localPhase.value === 'uploading': return '上传中…';
+    case localPhase.value === 'starting-task': return '创建任务中…';
+  }
+  switch (resumeTaskStatus.value) {
+    case 'pending': return '排队中…';
+    case 'processing': return '解析中…';
+    case 'done': return '已完成';
+    case 'error': return '失败';
+    default: return '未开始';
   }
 });
+
 const statusClass = computed(() => {
-  return {
-    'bg-yellow-50 border-yellow-200 text-yellow-800': uiStatus.value === 'idle' || uiStatus.value === 'uploading',
-    'bg-blue-50 border-blue-200 text-blue-800': uiStatus.value === 'task-started',
-    'bg-red-50 border-red-200 text-red-800': uiStatus.value === 'failed',
-  };
+  const st = statusText.value;
+  if (st.includes('失败')) return 'bg-red-50 border-red-200 text-red-800';
+  if (st.includes('完成')) return 'bg-blue-50 border-blue-200 text-blue-800';
+  if (st.includes('上传中') || st.includes('创建任务') || st.includes('排队') || st.includes('解析')) {
+    return 'bg-yellow-50 border-yellow-200 text-yellow-800';
+  }
+  return 'bg-gray-50 border-gray-200 text-gray-700';
 });
-
-function triggerFile() {
-  fileInput.value?.click();
-}
-
-// 保持与后端一致：直接传 filePath（即 storage 路径），后端在 parse-resume-task 会从存储读取
-function selectFilePathFromUploadResp(resp: any): string {
-  // 常见字段
-  let url: string = resp?.url || resp?.fileUrl || resp?.location || resp?.path || '';
-  if (!url && typeof resp?.filePath === 'string') url = resp.filePath;
-  if (!url && typeof resp?.data?.filePath === 'string') url = resp.data.filePath;
-  return typeof url === 'string' ? url : '';
-}
 
 async function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement;
   if (!input.files || input.files.length === 0) return;
   const file = input.files[0];
   fileName.value = file.name;
+  error.value = '';
 
   try {
-    uploading.value = true;
-    uiStatus.value = 'uploading';
-    error.value = null;
+    // 1) 上传（通过 Pinia，axios 只读一次 response）
+    localPhase.value = 'uploading';
+    const filePath = await app.upload(file);
 
-    // 1) 上传
-    const form = new FormData();
-    form.append('file', file);
+    // 2) 创建解析任务（通过 Pinia，命中 /api/parse-resume-task/start）
+    localPhase.value = 'starting-task';
+    await app.startResumeParseTask();
 
-    const uploadRes = await fetch('/api/upload', { method: 'POST', body: form });
-    // 只读取一次 body，避免 “body stream already read”
-    const uploadJson = await uploadRes.json().catch(async () => {
-      const txt = await uploadRes.text().catch(() => '');
-      throw new Error(`上传失败：${txt?.slice(0, 200) || '未知错误'}`);
-    });
-    if (!uploadRes.ok || !uploadJson?.ok) {
-      throw new Error(uploadJson?.error || '上传失败');
-    }
+    // 3) 立即触发一次轮询（由页面自行决定是否继续 wait）
+    await app.pollResumeTaskOnce();
 
-    const filePath = selectFilePathFromUploadResp(uploadJson);
-    if (!filePath) throw new Error('上传成功但未返回文件路径 filePath');
-
-    // 通知父组件上传完成
-    emit('uploaded', filePath);
-
-    // 2) 创建解析任务（注意路径：/api/parse-resume-task/start）
-    const startRes = await fetch('/api/parse-resume-task/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resumeFileUrl: filePath })
-    });
-    const startJson = await startRes.json().catch(async () => {
-      const txt = await startRes.text().catch(() => '');
-      throw new Error(`创建解析任务失败：${txt?.slice(0, 200) || '未知错误'}`);
-    });
-
-    const taskId = startJson?.data?.taskId || startJson?.taskId;
-    if (!startRes.ok || !startJson?.ok || !taskId) {
-      throw new Error(startJson?.error || '无法创建解析任务');
-    }
-
-    uiStatus.value = 'task-started';
-    emit('parsed', { taskId: String(taskId) });
   } catch (e: any) {
     console.error('[UploadCard] error', e);
-    error.value = e?.message || '发生错误';
-    uiStatus.value = 'failed';
+    error.value = e?.message || resumeTaskError.value || '发生错误';
   } finally {
-    uploading.value = false;
+    localPhase.value = 'idle';
   }
 }
 </script>

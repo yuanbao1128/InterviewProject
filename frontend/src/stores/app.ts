@@ -2,12 +2,6 @@
 import { defineStore } from 'pinia';
 import axios from 'axios';
 
-type ProgressState = {
-  current: number;
-  total: number;
-  followups_left?: number;
-};
-
 type TaskStatus = 'idle'|'pending'|'processing'|'done'|'error';
 
 export const useApp = defineStore('app', {
@@ -25,9 +19,7 @@ export const useApp = defineStore('app', {
     timerSec: 0,
     timerHandle: 0 as any,
     resumeFileUrl: '' as string,
-    // 简历解析结果（必须有）
     resumeSummary: null as any,
-    // 任务态
     resumeTaskId: '' as string,
     resumeTaskStatus: 'idle' as TaskStatus,
     resumeTaskError: '' as string
@@ -64,7 +56,6 @@ export const useApp = defineStore('app', {
       return filePath;
     },
 
-    // 开始一个“简历解析任务”
     async startResumeParseTask() {
       if (!this.resumeFileUrl) throw new Error('请先上传简历');
       this.resumeTaskStatus = 'pending';
@@ -81,7 +72,6 @@ export const useApp = defineStore('app', {
       this.resumeTaskStatus = 'processing';
     },
 
-    // 轮询任务状态（返回 true 表示已结束）
     async pollResumeTaskOnce() {
       if (!this.resumeTaskId) return false;
       const { data } = await axios.get(`${this.baseUrl}/api/parse-resume-task/status`, {
@@ -103,7 +93,6 @@ export const useApp = defineStore('app', {
       return false;
     },
 
-    // 连续轮询直到完成或超时
     async waitResumeTaskUntilDone({ intervalMs = 1500, maxWaitMs = 120000 } = {}) {
       const t0 = Date.now();
       while (Date.now() - t0 < maxWaitMs) {
@@ -117,7 +106,6 @@ export const useApp = defineStore('app', {
     },
 
     async start(payload: any) {
-      // 必须有解析结果才允许启动
       if (!this.resumeSummary || this.resumeTaskStatus !== 'done') {
         throw new Error('简历正在解析中，请稍候再开始');
       }
@@ -136,7 +124,6 @@ export const useApp = defineStore('app', {
         resumeSummary: this.resumeSummary
       };
 
-      // 保留文件路径
       if (typeof this.resumeFileUrl === 'string' && this.resumeFileUrl.trim().length > 0) {
         body.resumeFileUrl = this.resumeFileUrl.trim();
       }
@@ -178,9 +165,7 @@ export const useApp = defineStore('app', {
     },
 
     async getReport() {
-      if (!this.interviewId) {
-        throw new Error('缺少 interviewId');
-      }
+      if (!this.interviewId) throw new Error('缺少 interviewId');
       const { data } = await axios.get(`${this.baseUrl}/api/report`, {
         params: { interviewId: this.interviewId }
       });
