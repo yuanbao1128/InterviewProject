@@ -1,7 +1,7 @@
 <!-- src/components/UploadCard.vue -->
 <template>
   <div class="border rounded-lg p-4">
-    <div class="font-medium mb-2">{{ t.uploadTitle || '上传简历' }}</div>
+    <div class="font-medium mb-2">{{ t?.uploadTitle || '上传简历' }}</div>
 
     <div class="flex items-center gap-3">
       <input ref="fileInput" class="hidden" type="file" accept=".pdf,.doc,.docx,.txt" @change="onFileChange" />
@@ -39,10 +39,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 
-const props = defineProps<{ t: any }>();
+const props = defineProps<{ t?: any }>();
 const emit = defineEmits<{
   (e: 'uploaded', url: string): void
-  (e: 'parsed', payload: any): void
+  (e: 'parsed', payload: { taskId: string }): void
 }>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -74,13 +74,13 @@ function triggerFile() {
   fileInput.value?.click();
 }
 
-function buildPublicUrlFromFilePath(filePath: string) {
-  // 如果你的静态文件是通过 /public 或对象存储直链提供，按需拼接
-  // 1) 若后端的 /api/upload 返回的文件可通过 /uploads/<filePath> 访问：
-  // return `/uploads/${filePath}`;
-  // 2) 若返回的是存储桶相对路径，需要你的后端在 /start 中识别 filePath，无需拼 URL
-  // 默认返回原始 filePath，让 /start 去识别
-  return filePath;
+// 保持与后端一致：直接传 filePath（即 storage 路径），后端在 parse-resume-task 会从存储读取
+function selectFilePathFromUploadResp(resp: any): string {
+  // 常见字段
+  let url: string = resp?.url || resp?.fileUrl || resp?.location || resp?.path || '';
+  if (!url && typeof resp?.filePath === 'string') url = resp.filePath;
+  if (!url && typeof resp?.data?.filePath === 'string') url = resp.data.filePath;
+  return typeof url === 'string' ? url : '';
 }
 
 async function onFileChange(e: Event) {
@@ -98,67 +98,40 @@ async function onFileChange(e: Event) {
     const form = new FormData();
     form.append('file', file);
 
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-
-    // 兼容文本错误响应
-    let data: any = null;
-    try {
-      data = await res.json();
-    } catch {
-      const txt = await res.text();
+    const uploadRes = await fetch('/api/upload', { method: 'POST', body: form });
+    // 只读取一次 body，避免 “body stream already read”
+    const uploadJson = await uploadRes.json().catch(async () => {
+      const txt = await uploadRes.text().catch(() => '');
       throw new Error(`上传失败：${txt?.slice(0, 200) || '未知错误'}`);
-    }
-    if (!res.ok || !data?.ok) {
-      // 你的示例里是 { ok: true, data: {...} }，也兼容 { ok: true, filePath: ... }
-      throw new Error(data?.error || '上传失败');
-    }
-
-    // 2) 取文件“可传递给后端”的地址/路径（兼容你的字段）
-    // 优先常见字段
-    let url: string =
-      data.url || data.fileUrl || data.location || data.path || '';
-
-    // 兼容你截图中的结构：{ ok: true, data: { filePath: 'resumes/..pdf', bucket: 'resumes', originalName: '...' } }
-    if (!url && data.data && typeof data.data.filePath === 'string') {
-      url = buildPublicUrlFromFilePath(data.data.filePath);
+    });
+    if (!uploadRes.ok || !uploadJson?.ok) {
+      throw new Error(uploadJson?.error || '上传失败');
     }
 
-    // 有些实现返回 { ok: true, filePath: 'resumes/..pdf' }
-    if (!url && typeof data.filePath === 'string') {
-      url = buildPublicUrlFromFilePath(data.filePath);
-    }
+    const filePath = selectFilePathFromUploadResp(uploadJson);
+    if (!filePath) throw new Error('上传成功但未返回文件路径 filePath');
 
-    if (!url) {
-      console.warn('[UploadCard] unexpected upload response', data);
-      throw new Error('上传成功但未返回文件路径/URL（缺少 url/fileUrl/path/location/data.filePath）');
-    }
+    // 通知父组件上传完成
+    emit('uploaded', filePath);
 
-    // 通知父组件：文件已上传
-    emit('uploaded', url);
-
-    // 3) 创建解析任务（任务制接口）
-    const startRes = await fetch('/api/parse-resume/start', {
+    // 2) 创建解析任务（注意路径：/api/parse-resume-task/start）
+    const startRes = await fetch('/api/parse-resume-task/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // 后端可以同时接受 { fileUrl } 或 { filePath }，这里统一传 fileUrl 字段承载你返回的“路径或URL”
-      body: JSON.stringify({ fileUrl: url })
+      body: JSON.stringify({ resumeFileUrl: filePath })
+    });
+    const startJson = await startRes.json().catch(async () => {
+      const txt = await startRes.text().catch(() => '');
+      throw new Error(`创建解析任务失败：${txt?.slice(0, 200) || '未知错误'}`);
     });
 
-    let startData: any = null;
-    try {
-      startData = await startRes.json();
-    } catch {
-      const txt = await startRes.text();
-      throw new Error(`创建解析任务失败：${txt?.slice(0, 200) || '未知错误'}`);
-    }
-
-    if (!startRes.ok || !startData?.ok || !startData?.taskId) {
-      throw new Error(startData?.error || '无法创建解析任务');
+    const taskId = startJson?.data?.taskId || startJson?.taskId;
+    if (!startRes.ok || !startJson?.ok || !taskId) {
+      throw new Error(startJson?.error || '无法创建解析任务');
     }
 
     uiStatus.value = 'task-started';
-    // 抛出 taskId，Setup.vue 会轮询 /status
-    emit('parsed', { taskId: String(startData.taskId) });
+    emit('parsed', { taskId: String(taskId) });
   } catch (e: any) {
     console.error('[UploadCard] error', e);
     error.value = e?.message || '发生错误';
