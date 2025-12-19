@@ -7,33 +7,34 @@ import { supabase } from './supabase.js';
 export async function downloadFromStorage(bucket: string, path: string): Promise<ArrayBuffer> {
   const { data, error } = await supabase.storage.from(bucket).download(path);
   if (error) throw new Error(`Storage download failed: ${error.message}`);
-  // data 是 Blob
   return await data.arrayBuffer();
 }
 
 /**
- * 使用 pdf-parse 将 PDF（二进制）提取为纯文本
- * 说明：
- * - 采用动态导入 CommonJS 入口（pdf-parse 默认导出）以兼容 ESM 环境
- * - 该实现不依赖 DOM/Canvas，适用于 Node.js Runtime（Vercel Serverless / Node 运行时）
+ * 使用 pdf-text-extract 提取 PDF 文本（纯 Node，无 pdfjs/DOM）
  */
 export async function pdfArrayBufferToText(buf: ArrayBuffer): Promise<string> {
-  // 动态导入 CommonJS 入口。注意这里不带子路径，直接 'pdf-parse'
-  const mod: any = await import('pdf-parse');
-  const pdfParse = mod.default || mod; // 兼容不同打包方式
+  // 动态导入，避免前端打包
+  const mod: any = await import('pdf-text-extract');
+  const extract = mod.default || mod;
 
-  const b = Buffer.from(buf);
-  const res = await pdfParse(b);
-  return normalizeText(res?.text || '');
+  // 该库需要文件路径或 Buffer
+  const buffer = Buffer.from(buf);
+
+  const text: string = await new Promise((resolve, reject) => {
+    extract(buffer, { splitPages: false }, (err: any, pages: string[] | string) => {
+      if (err) return reject(err);
+      const joined = Array.isArray(pages) ? pages.join('\n') : pages;
+      resolve(joined || '');
+    });
+  });
+
+  return normalizeText(text);
 }
 
-/**
- * 简单文本清洗：去除 NUL、压缩空白、规范换行
- */
 function normalizeText(s: string) {
-  return s
-    .replace(/\u0000/g, '')          // 去除 NUL
-    .replace(/[ \t]+/g, ' ')         // 连续空格/Tab 压缩为一个空格
-    .replace(/\s*\n\s*/g, '\n')      // 规范换行两侧空白
+  return s.replace(/\u0000/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
     .trim();
 }
