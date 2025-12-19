@@ -9,6 +9,10 @@ const EMBEDDING_MODEL =
   process.env.EMBEDDING_MODEL ||
   (PROVIDER === 'deepseek' ? '' : 'text-embedding-3-small')
 
+// 上游调用可配置超时与重试（默认 8s、重试 2 次）
+const UPSTREAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 8000)
+const UPSTREAM_RETRIES = Number(process.env.LLM_RETRIES || 2)
+
 let apiKey = ''
 let baseURL: string | undefined
 
@@ -30,6 +34,42 @@ if (!apiKey) {
   throw new Error(`Missing API key for provider=${PROVIDER}. ${hint}`)
 }
 
-const client = new OpenAI({ apiKey, baseURL })
+// 自定义带超时与重试的 fetch；OpenAI SDK 支持传入自定义 fetch
+function createTimedFetch(timeoutMs: number, maxRetries: number) {
+  return async (url: string, init?: RequestInit) => {
+    let lastErr: any
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+      const started = Date.now()
+      try {
+        const res = await fetch(url, { ...init, signal: ctrl.signal })
+        const rt = Date.now() - started
+        // 记录上游响应概览（不打印敏感头）
+        try {
+          const host = new URL(url).host
+          console.log('[llm.fetch.ok]', { host, status: res.status, rt, attempt })
+        } catch {}
+        clearTimeout(timer)
+        return res
+      } catch (e: any) {
+        clearTimeout(timer)
+        const msg = e?.message || String(e)
+        const name = e?.name || ''
+        const retriable = name === 'AbortError' || /network|fetch|timeout/i.test(msg)
+        console.warn('[llm.fetch.error]', { attempt, name, msg })
+        lastErr = e
+        if (!retriable || attempt === maxRetries) throw e
+        // 线性退避
+        await new Promise(r => setTimeout(r, 200 * attempt))
+      }
+    }
+    throw lastErr
+  }
+}
+
+const timedFetch = createTimedFetch(UPSTREAM_TIMEOUT_MS, UPSTREAM_RETRIES)
+
+const client = new OpenAI({ apiKey, baseURL, fetch: timedFetch as any })
 
 export { client, MODEL, EMBEDDING_MODEL, PROVIDER }
