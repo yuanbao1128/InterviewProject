@@ -91,7 +91,7 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本');
     }
 
-    // 4) LLM 流式聚合 + 总超时
+    // 4) LLM 流式聚合 + 总超时（增强日志与错误兜底）
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}';
@@ -100,31 +100,65 @@ async function processTask(taskId: string) {
     const t0 = Date.now();
     console.log('[resume-task] llm.start', JSON.stringify({ ...context, model: MODEL, timeoutMs: LLM_TIMEOUT_MS }));
 
-    const stream = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: rawText }
-      ],
-      temperature: 0.2,
-      stream: true
-    });
+    let stream: any;
+    try {
+      stream = await client.chat.completions.create({
+        model: MODEL,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: rawText }
+        ],
+        temperature: 0.2,
+        stream: true
+      });
+      console.log('[resume-task] llm.create.ok', JSON.stringify({ ...context }));
+    } catch (e: any) {
+      console.error('[resume-task] llm.create.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
+      throw e;
+    }
 
     let content = '';
     let chunks = 0;
-    for await (const chunk of withTimeoutStream(stream, LLM_TIMEOUT_MS)) {
-      const delta = chunk.choices?.[0]?.delta?.content || '';
-      if (delta) content += delta;
-      chunks++;
-      if (chunks % 50 === 0) {
-        console.log('[resume-task] llm.stream.heartbeat', JSON.stringify({ ...context, chunks, bytes: content.length }));
+    let firstDeltaAt: number | null = null;
+
+    try {
+      for await (const chunk of withTimeoutStream(stream, LLM_TIMEOUT_MS)) {
+        // 记录原始关键字段，便于排查供应商差异
+        const choice = chunk?.choices?.[0];
+        const delta = choice?.delta?.content || '';
+        const finish = choice?.finish_reason || chunk?.finish_reason || null;
+
+        // 供应商可能把错误放在首包/中途
+        const providerErr =
+          chunk?.error ||
+          choice?.delta?.error ||
+          choice?.message?.content === null && (finish === 'error' || finish === 'content_filter');
+
+        if (!firstDeltaAt && delta) firstDeltaAt = Date.now();
+
+        if (providerErr) {
+          console.error('[resume-task] llm.stream.providerError', JSON.stringify({ ...context, err: String(providerErr?.message || providerErr), chunks }));
+          throw new Error(`providerError: ${String(providerErr?.message || providerErr)}`);
+        }
+
+        if (delta) content += delta;
+        chunks++;
+        if (chunks % 50 === 0) {
+          console.log('[resume-task] llm.stream.heartbeat', JSON.stringify({ ...context, chunks, bytes: content.length, finish }));
+        }
       }
+    } catch (e: any) {
+      console.error('[resume-task] llm.stream.error', JSON.stringify({ ...context, err: String(e?.message || e), chunksSoFar: chunks, bytesSoFar: content.length }));
+      throw e;
     }
-    console.log('[resume-task] llm.stream.end', JSON.stringify({ ...context, chunks, bytes: content.length, ms: Date.now() - t0 }));
 
     const latency = Date.now() - t0;
+    console.log('[resume-task] llm.stream.end', JSON.stringify({
+      ...context,
+      chunks, bytes: content.length, ms: latency, firstDeltaMs: firstDeltaAt ? (firstDeltaAt - t0) : null
+    }));
 
-    // 5) 审计（失败也要审）
+    // 5) 审计（失败也要审）——保持你的原逻辑，仅补充耗时来自 latency
     const tAudit0 = Date.now();
     try {
       await auditLLM(query, {
@@ -143,13 +177,19 @@ async function processTask(taskId: string) {
       console.log('[resume-task] audit.skip', JSON.stringify({ ...context, err: String(e?.message || e) }));
     }
 
-    // 6) JSON 解析（失败尝试修复）
+    // 6) JSON 解析（失败尝试修复 + 辅助定位日志）
     let parsed: any = {};
     try {
       parsed = JSON.parse(content || '{}');
       console.log('[resume-task] json.parse.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
     } catch (e: any) {
-      console.log('[resume-task] json.parse.fail.tryFix', JSON.stringify({ ...context, err: String(e?.message || e) }));
+      console.log('[resume-task] json.parse.fail.tryFix', JSON.stringify({
+        ...context,
+        err: String(e?.message || e),
+        bytes: (content || '').length,
+        head: (content || '').slice(0, 120),
+        tail: (content || '').slice(-120)
+      }));
       const fixed = tryFixJson(content || '');
       parsed = JSON.parse(fixed);
       console.log('[resume-task] json.parse.fixed.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
