@@ -6,20 +6,16 @@ import path from 'path';
 import { spawn } from 'child_process';
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!; // 或 SUPABASE_SERVICE_ROLE_KEY
-
-const PDF_ENGINE = (process.env.PDF_ENGINE || 'js').toLowerCase(); // 'js' | 'poppler'
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+const PDF_ENGINE = (process.env.PDF_ENGINE || 'js').toLowerCase();
 const PDF_TIMEOUT_MS = Number(process.env.PDF_TIMEOUT_MS || 60000);
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_KEY');
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false },
-});
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } });
 
-// 统一二进制守卫
 function toU8(input: ArrayBuffer | Uint8Array | any): Uint8Array {
   if (input instanceof Uint8Array) return input;
   if (typeof Buffer !== 'undefined' && Buffer.isBuffer?.(input)) {
@@ -31,30 +27,22 @@ function toU8(input: ArrayBuffer | Uint8Array | any): Uint8Array {
   throw new TypeError('Invalid binary input: expected ArrayBuffer/Uint8Array/Buffer');
 }
 
-// 给 Blob.arrayBuffer() 加超时与错误包装，防止卡住不返回
 async function readBlobWithTimeout(blob: Blob, ms: number, traceId?: string): Promise<ArrayBuffer> {
-  const controller = new AbortController();
   let timeout: any;
   try {
     const p = blob.arrayBuffer();
     const t = new Promise<never>((_, reject) => {
-      timeout = setTimeout(() => {
-        reject(new Error(`blob.arrayBuffer timeout after ${ms}ms`));
-      }, ms);
+      timeout = setTimeout(() => reject(new Error(`blob.arrayBuffer timeout after ${ms}ms`)), ms);
     });
-    // 竞赛，谁先完成用谁
-    const ab = await Promise.race([p, t]) as ArrayBuffer;
-    return ab;
+    return await Promise.race([p, t]) as ArrayBuffer;
   } catch (e: any) {
     console.log('[pdf] storage.readBlob.error', JSON.stringify({ traceId, err: String(e?.message || e) }));
     throw e;
   } finally {
     clearTimeout(timeout);
-    try { (controller as any).abort?.(); } catch {}
   }
 }
 
-// 下载文件为 ArrayBuffer（带 arrayBuffer 超时保护）
 export async function downloadFromStorage(bucket: string, filePath: string, traceId?: string): Promise<ArrayBuffer> {
   const t0 = Date.now();
   console.log('[pdf] storage.download.start', JSON.stringify({ traceId, bucket, filePath }));
@@ -64,7 +52,6 @@ export async function downloadFromStorage(bucket: string, filePath: string, trac
     console.log('[pdf] storage.download.error', JSON.stringify({ traceId, bucket, filePath, ms, error: String(error.message || error) }));
     throw new Error(`Storage download failed: ${error.message}`);
   }
-  // 关键：arrayBuffer 可能卡住或抛错，这里强制加超时
   const ab = await readBlobWithTimeout(data as Blob, PDF_TIMEOUT_MS, traceId);
   const ms = Date.now() - t0;
   const size = (data as any)?.size ?? (ab?.byteLength ?? null);
@@ -74,7 +61,6 @@ export async function downloadFromStorage(bucket: string, filePath: string, trac
 
 export async function pdfArrayBufferToText(ab: ArrayBuffer, traceId?: string): Promise<string> {
   const u8 = toU8(ab);
-
   const wantPoppler = PDF_ENGINE === 'poppler';
   if (wantPoppler) {
     const ok = await canSpawnPdftotext(traceId);
@@ -117,8 +103,8 @@ async function parseWithUnpdf(u8: Uint8Array, traceId?: string): Promise<string>
 
     const mod: any = await import('unpdf');
     const extractText: undefined | ((buf: Uint8Array, opts?: any) => Promise<{ text?: string } | string>) =
-      (mod && typeof mod.extractText === 'function' && mod.extractText)
-      || (mod && mod.default && typeof mod.default.extractText === 'function' && mod.default.extractText);
+      (mod && typeof mod.extractText === 'function' && mod.extractText) ||
+      (mod && mod.default && typeof mod.default.extractText === 'function' && mod.default.extractText);
 
     if (!extractText) throw new Error('unpdf.extractText not found');
 
@@ -126,11 +112,7 @@ async function parseWithUnpdf(u8: Uint8Array, traceId?: string): Promise<string>
     const to = setTimeout(() => { try { (controller as any).abort?.(); } catch {} }, PDF_TIMEOUT_MS);
 
     try {
-      const res = await extractText(u8, {
-        mergePages: true,
-        sortByY: true,
-        signal: (controller as any).signal,
-      });
+      const res = await extractText(u8, { mergePages: true, sortByY: true, signal: (controller as any).signal });
       const rawText = (typeof res === 'string') ? res : (res?.text ?? '');
       const text = normalizeText(rawText);
       console.log('[pdf] unpdf.ok', JSON.stringify({ traceId, ms: Date.now() - t0, chars: text.length }));
@@ -184,7 +166,6 @@ async function parseWithPdfTextExtract(u8: Uint8Array, traceId?: string): Promis
       };
 
       const to = setTimeout(() => done(new Error(`pdftotext timeout after ${PDF_TIMEOUT_MS}ms`)), PDF_TIMEOUT_MS);
-
       try {
         console.log('[pdf] extract.invoked', JSON.stringify({ traceId, tmpFile }));
         extract(tmpFile, (err: any, out: string[] | string) => {
