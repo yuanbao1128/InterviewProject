@@ -20,7 +20,9 @@ const baseURL = (BASE_RAW || DEFAULTS[PROVIDER]).replace(/\/+$/, '')
 
 if (!API_KEY) throw new Error(`Missing API key for provider=${PROVIDER}. 缺少 OPENAI_API_KEY`)
 
-const UPSTREAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 8000)
+// 提高默认超时到 60s（可被 env 覆盖）
+const UPSTREAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60000)
+// 可保留 2 次，也可设 3 次
 const UPSTREAM_RETRIES = Number(process.env.LLM_RETRIES || 2)
 
 console.log('[llm] init', {
@@ -53,7 +55,8 @@ function createTimedFetch(timeoutMs: number, maxRetries: number) {
         console.warn('[llm.fetch.error]', { attempt, name, msg })
         lastErr = e
         if (!retriable || attempt === maxRetries) throw e
-        await new Promise(r => setTimeout(r, 200 * attempt))
+        // 加长退避时间
+        await new Promise(r => setTimeout(r, 400 * attempt))
       }
     }
     throw lastErr
@@ -69,7 +72,7 @@ const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || (PROVIDER === 'deepseek' 
 
 export { client, MODEL, EMBEDDING_MODEL, PROVIDER }
 
-// 新增：给流式可迭代增加总超时，避免 for-await 永久挂起
+// 流式总超时工具保留
 export async function* withTimeoutStream<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T, void, unknown> {
   const iterator = iterable[Symbol.asyncIterator]()
   try {
