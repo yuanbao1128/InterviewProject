@@ -39,7 +39,10 @@ r.get('/parse-resume-task/status', async (c) => {
   const taskId = c.req.query('taskId');
   if (!taskId) return c.json({ ok: false, error: '缺少 taskId' }, 400);
 
-  const { rows } = await query<any>(`select id, status, result, error, updated_at from app.resume_tasks where id = $1`, [taskId]);
+  const { rows } = await query<any>(
+  select id, status, result, error from app.resume_tasks where id = $1,
+  [taskId]
+  );
   if (rows.length === 0) return c.json({ ok: false, error: '任务不存在' }, 404);
 
   const rec = rows[0];
