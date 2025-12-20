@@ -27,6 +27,7 @@ r.post('/parse-resume-task/start', async (c) => {
 
   console.log('[resume-task] start.accepted', JSON.stringify({ taskId, hasFileUrl: !!resumeFileUrl, hasText: !!resumeText }));
 
+  // 异步处理
   processTask(taskId).catch((e) => {
     console.error('[resume-task] processTask unhandled', { taskId, err: String(e?.message || e) });
   });
@@ -59,7 +60,7 @@ async function processTask(taskId: string) {
   }));
 
   try {
-    // 1) 标记 processing（只更新 pending -> processing）
+    // 1) 标记 processing
     const tMark0 = Date.now();
     const upd = await query(`update app.resume_tasks set status='processing' where id=$1 and status in ('pending')`, [taskId]);
     ensureDbWriteOk(upd, 'mark processing (maybe already processing/done/error)');
@@ -73,7 +74,7 @@ async function processTask(taskId: string) {
     let rawText: string | null = rows[0].resume_text;
     const fileUrl: string | null = rows[0].resume_file_url;
 
-    // 3) 如需要，从存储下载并提取文本
+    // 3) 下载并提取文本（如需要）
     if ((!rawText || !rawText.trim()) && fileUrl) {
       console.log('[resume-task] download.start', JSON.stringify({ ...context, bucket: STORAGE_BUCKET, fileUrl }));
       const tDl0 = Date.now();
@@ -91,7 +92,7 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本');
     }
 
-    // 4) LLM 非流式调用（避免 Serverless 流中断）
+    // 4) LLM 非流式调用
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}';
@@ -117,7 +118,11 @@ async function processTask(taskId: string) {
       throw e;
     }
 
-    // 5) 审计（失败也要审）
+    if (!content || !content.trim()) {
+      throw new Error('LLM 返回空响应');
+    }
+
+    // 5) 审计
     const latency = Date.now() - t0;
     const tAudit0 = Date.now();
     try {
@@ -137,7 +142,7 @@ async function processTask(taskId: string) {
       console.log('[resume-task] audit.skip', JSON.stringify({ ...context, err: String(e?.message || e) }));
     }
 
-    // 6) JSON 解析（失败尝试修复 + 辅助定位日志）
+    // 6) JSON 解析（失败尝试修复）
     let parsed: any = {};
     try {
       parsed = JSON.parse(content || '{}');
@@ -147,15 +152,20 @@ async function processTask(taskId: string) {
         ...context,
         err: String(e?.message || e),
         bytes: (content || '').length,
-        head: (content || '').slice(0, 120),
-        tail: (content || '').slice(-120)
+        head: (content || '').slice(0, 160),
+        tail: (content || '').slice(-160)
       }));
-      const fixed = tryFixJson(content || '');
-      parsed = JSON.parse(fixed);
-      console.log('[resume-task] json.parse.fixed.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
+      try {
+        const fixed = tryFixJson(content || '');
+        parsed = JSON.parse(fixed);
+        console.log('[resume-task] json.parse.fixed.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
+      } catch (e2: any) {
+        // 最终仍失败，抛出带原始内容的错误
+        throw new Error(`JSON 解析失败: ${String(e2?.message || e2)}`);
+      }
     }
 
-    // 7) 写回结果（严格检查影响行数）
+    // 7) 写回结果
     const tUpd0 = Date.now();
     const upd2 = await query(
       `update app.resume_tasks set status='done', result=$2, error=null where id=$1`,
