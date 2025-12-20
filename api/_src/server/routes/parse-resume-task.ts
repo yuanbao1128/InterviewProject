@@ -1,7 +1,7 @@
 // api/src/server/routes/parse-resume-task.ts
 import { Hono } from 'hono';
 import { query, ensureDbWriteOk } from '../lib/db.js';
-import { client, MODEL, withTimeoutStream } from '../lib/llm.js';
+import { client, MODEL } from '../lib/llm.js';
 import { STORAGE_BUCKET } from '../lib/supabase.js';
 import { downloadFromStorage, pdfArrayBufferToText } from '../lib/pdf.js';
 import { auditLLM } from '../lib/util.js';
@@ -91,79 +91,34 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本');
     }
 
-    // 4) LLM 流式聚合 + 总超时（增强日志与错误兜底）
+    // 4) LLM 非流式调用（避免 Serverless 流中断）
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}';
 
-    const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60000);
     const t0 = Date.now();
-    console.log('[resume-task] llm.start', JSON.stringify({ ...context, model: MODEL, timeoutMs: LLM_TIMEOUT_MS }));
+    console.log('[resume-task] llm.start', JSON.stringify({ ...context, model: MODEL }));
 
-    let stream: any;
+    let content = '';
     try {
-      stream = await client.chat.completions.create({
+      const resp = await client.chat.completions.create({
         model: MODEL,
         messages: [
           { role: 'system', content: sys },
           { role: 'user', content: rawText }
         ],
-        temperature: 0.2,
-        stream: true
+        temperature: 0.2
       });
-      console.log('[resume-task] llm.create.ok', JSON.stringify({ ...context }));
+      const choice = resp.choices?.[0];
+      content = choice?.message?.content ?? '';
+      console.log('[resume-task] llm.nostream.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: content.length }));
     } catch (e: any) {
-      console.error('[resume-task] llm.create.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
+      console.error('[resume-task] llm.nostream.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
       throw e;
     }
-
-    let content = '';
-    let chunks = 0;
-    let firstDeltaAt: number | null = null;
-
-    try {
-      // 关键：将 chunk 显式标注为 any，避免 TS 报错（不同提供商的流片段结构不同）
-      for await (const _chunk of withTimeoutStream<any>(stream as any, LLM_TIMEOUT_MS)) {
-        const chunk: any = _chunk as any;
-
-        // 宽松读取，均带可选链，避免运行时报错
-        const choice = (chunk && Array.isArray(chunk.choices) && chunk.choices[0]) ? chunk.choices[0] : undefined;
-        const delta: string = (choice && typeof choice.delta?.content === 'string') ? choice.delta.content : '';
-        const finish: string | null =
-          (choice && typeof choice.finish_reason === 'string' ? choice.finish_reason : null) ||
-          (typeof (chunk as any)?.finish_reason === 'string' ? (chunk as any).finish_reason : null);
-
-        // 供应商可能把错误放在首包/中途
-        const providerErr: any =
-          (chunk as any)?.error ||
-          (choice as any)?.delta?.error ||
-          (choice as any)?.error;
-
-        if (!firstDeltaAt && delta) firstDeltaAt = Date.now();
-
-        if (providerErr) {
-          console.error('[resume-task] llm.stream.providerError', JSON.stringify({ ...context, err: String(providerErr?.message || providerErr), chunks }));
-          throw new Error(`providerError: ${String(providerErr?.message || providerErr)}`);
-        }
-
-        if (delta) content += delta;
-        chunks++;
-        if (chunks % 50 === 0) {
-          console.log('[resume-task] llm.stream.heartbeat', JSON.stringify({ ...context, chunks, bytes: content.length, finish }));
-        }
-      }
-    } catch (e: any) {
-      console.error('[resume-task] llm.stream.error', JSON.stringify({ ...context, err: String(e?.message || e), chunksSoFar: chunks, bytesSoFar: content.length }));
-      throw e;
-    }
-
-    const latency = Date.now() - t0;
-    console.log('[resume-task] llm.stream.end', JSON.stringify({
-      ...context,
-      chunks, bytes: content.length, ms: latency, firstDeltaMs: firstDeltaAt ? (firstDeltaAt - t0) : null
-    }));
 
     // 5) 审计（失败也要审）
+    const latency = Date.now() - t0;
     const tAudit0 = Date.now();
     try {
       await auditLLM(query, {
