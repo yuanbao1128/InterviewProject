@@ -20,10 +20,12 @@ const baseURL = (BASE_RAW || DEFAULTS[PROVIDER]).replace(/\/+$/, '')
 
 if (!API_KEY) throw new Error(`Missing API key for provider=${PROVIDER}. 缺少 OPENAI_API_KEY`)
 
-// 提高默认超时到 60s（可被 env 覆盖）
+// 默认 60s，可用 env LLM_TIMEOUT_MS 覆盖
 const UPSTREAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60000)
-// 可保留 2 次，也可设 3 次
+// 重试次数
 const UPSTREAM_RETRIES = Number(process.env.LLM_RETRIES || 2)
+// 建议的业务侧硬兜底（parse-resume-task.ts 中使用自己的 env 配置）
+export const HARD_TIMEOUT_SUGGESTED = Number(process.env.LLM_HARD_TIMEOUT_MS || 90000)
 
 console.log('[llm] init', {
   provider: PROVIDER,
@@ -55,7 +57,7 @@ function createTimedFetch(timeoutMs: number, maxRetries: number) {
         console.warn('[llm.fetch.error]', { attempt, name, msg })
         lastErr = e
         if (!retriable || attempt === maxRetries) throw e
-        // 加长退避时间
+        // 指数退避
         await new Promise(r => setTimeout(r, 400 * attempt))
       }
     }
@@ -64,7 +66,6 @@ function createTimedFetch(timeoutMs: number, maxRetries: number) {
 }
 
 const timedFetch = createTimedFetch(UPSTREAM_TIMEOUT_MS, UPSTREAM_RETRIES)
-
 const client = new OpenAI({ apiKey: API_KEY, baseURL, fetch: timedFetch as any })
 
 const MODEL = process.env.MODEL_NAME || (PROVIDER === 'deepseek' ? 'deepseek-chat' : 'gpt-4o-mini')

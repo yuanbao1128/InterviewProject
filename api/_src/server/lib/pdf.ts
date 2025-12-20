@@ -67,7 +67,11 @@ export async function downloadFromStorage(bucket: string, filePath: string, trac
   const url = su.signedUrl
   let res: Response
   try {
-    res = await withTimeout(fetch(url, { signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS) }), STORAGE_TIMEOUTMS_SAFE(), 'fetch.signedUrl')
+    res = await withTimeout(
+      fetch(url, { signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS) }),
+      storageTimeoutSafeMs(),
+      'fetch.signedUrl'
+    )
   } catch (e: any) {
     console.error('[pdf] http.download.fetchError', JSON.stringify({ traceId, bucket, filePath: file, err: String(e?.name || '') + ': ' + String(e?.message || e) }))
     throw e
@@ -85,7 +89,7 @@ export async function downloadFromStorage(bucket: string, filePath: string, trac
   return ab
 }
 
-function STORAGE_TIMEOUTMS_SAFE() {
+function storageTimeoutSafeMs() {
   // Node18 AbortSignal.timeout 已经有，仍保留上层 withTimeout 双保险
   return Math.max(1000, STORAGE_TIMEOUT_MS)
 }

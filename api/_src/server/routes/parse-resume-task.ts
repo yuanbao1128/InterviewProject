@@ -92,7 +92,7 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本');
     }
 
-    // 4) LLM 非流式调用
+    // 4) LLM 非流式调用（加入硬兜底超时与心跳日志）
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}';
@@ -101,8 +101,15 @@ async function processTask(taskId: string) {
     console.log('[resume-task] llm.start', JSON.stringify({ ...context, model: MODEL }));
 
     let content = '';
+    // 兜底超时：避免上游长时间不首包导致“卡住不报错”
+    const hardTimeoutMs = Number(process.env.LLM_HARD_TIMEOUT_MS || 90000); // 默认 90s
+    const heartbeat = setInterval(() => {
+      console.log('[resume-task] llm.waiting', JSON.stringify({ ...context, elapsed: Date.now() - t0 }));
+    }, 2000);
+
     try {
-      const resp = await client.chat.completions.create({
+      // 方式 A：沿用 SDK，但外面再包一层 Promise.race 做硬兜底超时
+      const p = client.chat.completions.create({
         model: MODEL,
         messages: [
           { role: 'system', content: sys },
@@ -110,12 +117,27 @@ async function processTask(taskId: string) {
         ],
         temperature: 0.2
       });
-      const choice = resp.choices?.[0];
+
+      const resp: any = await Promise.race([
+        p,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`llm hard timeout after ${hardTimeoutMs}ms`)), hardTimeoutMs))
+      ]);
+
+      const choice = resp?.choices?.[0];
       content = choice?.message?.content ?? '';
+
       console.log('[resume-task] llm.nostream.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: content.length }));
+
+      // 方式 B：可选，绕过 SDK 直接 REST（排查 SDK 卡顿时启用）
+      // const { restCompletion } = await import('../util-rest-llm.js'); // 需要你创建一个简单的 REST 调用工具
+      // const contentByRest = await restCompletion(sys, rawText, MODEL, hardTimeoutMs);
+      // content = contentByRest;
+      // console.log('[resume-task] llm.rest.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: content.length }));
     } catch (e: any) {
       console.error('[resume-task] llm.nostream.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
       throw e;
+    } finally {
+      clearInterval(heartbeat);
     }
 
     if (!content || !content.trim()) {
@@ -160,7 +182,6 @@ async function processTask(taskId: string) {
         parsed = JSON.parse(fixed);
         console.log('[resume-task] json.parse.fixed.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
       } catch (e2: any) {
-        // 最终仍失败，抛出带原始内容的错误
         throw new Error(`JSON 解析失败: ${String(e2?.message || e2)}`);
       }
     }
