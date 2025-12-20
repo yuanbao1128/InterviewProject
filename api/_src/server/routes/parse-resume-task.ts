@@ -122,17 +122,22 @@ async function processTask(taskId: string) {
     let firstDeltaAt: number | null = null;
 
     try {
-      for await (const chunk of withTimeoutStream(stream, LLM_TIMEOUT_MS)) {
-        // 记录原始关键字段，便于排查供应商差异
-        const choice = chunk?.choices?.[0];
-        const delta = choice?.delta?.content || '';
-        const finish = choice?.finish_reason || chunk?.finish_reason || null;
+      // 关键：将 chunk 显式标注为 any，避免 TS 报错（不同提供商的流片段结构不同）
+      for await (const _chunk of withTimeoutStream<any>(stream as any, LLM_TIMEOUT_MS)) {
+        const chunk: any = _chunk as any;
+
+        // 宽松读取，均带可选链，避免运行时报错
+        const choice = (chunk && Array.isArray(chunk.choices) && chunk.choices[0]) ? chunk.choices[0] : undefined;
+        const delta: string = (choice && typeof choice.delta?.content === 'string') ? choice.delta.content : '';
+        const finish: string | null =
+          (choice && typeof choice.finish_reason === 'string' ? choice.finish_reason : null) ||
+          (typeof (chunk as any)?.finish_reason === 'string' ? (chunk as any).finish_reason : null);
 
         // 供应商可能把错误放在首包/中途
-        const providerErr =
-          chunk?.error ||
-          choice?.delta?.error ||
-          choice?.message?.content === null && (finish === 'error' || finish === 'content_filter');
+        const providerErr: any =
+          (chunk as any)?.error ||
+          (choice as any)?.delta?.error ||
+          (choice as any)?.error;
 
         if (!firstDeltaAt && delta) firstDeltaAt = Date.now();
 
@@ -158,7 +163,7 @@ async function processTask(taskId: string) {
       chunks, bytes: content.length, ms: latency, firstDeltaMs: firstDeltaAt ? (firstDeltaAt - t0) : null
     }));
 
-    // 5) 审计（失败也要审）——保持你的原逻辑，仅补充耗时来自 latency
+    // 5) 审计（失败也要审）
     const tAudit0 = Date.now();
     try {
       await auditLLM(query, {
