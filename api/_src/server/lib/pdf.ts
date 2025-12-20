@@ -20,6 +20,21 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false },
 });
 
+// 更鲁棒的二进制守卫：支持 ArrayBuffer / Uint8Array / Buffer
+function toU8(input: ArrayBuffer | Uint8Array | any): Uint8Array {
+  if (input instanceof Uint8Array) return input;
+  // Node Buffer 兼容
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer?.(input)) {
+    // 使用同一底层 ArrayBuffer，避免复制；保持视图范围正确
+    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  }
+  // ArrayBuffer
+  if (input && typeof input === 'object' && typeof (input as ArrayBuffer).byteLength === 'number') {
+    return new Uint8Array(input as ArrayBuffer);
+  }
+  throw new TypeError('Invalid binary input: expected ArrayBuffer/Uint8Array/Buffer');
+}
+
 // 下载文件为 ArrayBuffer
 export async function downloadFromStorage(bucket: string, filePath: string, traceId?: string): Promise<ArrayBuffer> {
   const t0 = Date.now();
@@ -32,14 +47,15 @@ export async function downloadFromStorage(bucket: string, filePath: string, trac
   }
   const ab = await data.arrayBuffer();
   const ms = Date.now() - t0;
-  console.log('[pdf] storage.download.ok', JSON.stringify({ traceId, bucket, filePath, ms, size: (data as any)?.size ?? (ab?.byteLength ?? null) }));
+  const size = (data as any)?.size ?? (ab?.byteLength ?? null);
+  console.log('[pdf] storage.download.ok', JSON.stringify({ traceId, bucket, filePath, ms, size }));
   return ab;
 }
 
 // 统一入口：根据引擎选择解析
 export async function pdfArrayBufferToText(ab: ArrayBuffer, traceId?: string): Promise<string> {
   // 重要：统一转为 Uint8Array，避免库要求“请传 Uint8Array 而非 Buffer”的错误
-  const u8 = ab instanceof Uint8Array ? ab : new Uint8Array(ab);
+  const u8 = toU8(ab);
 
   const wantPoppler = PDF_ENGINE === 'poppler';
   if (wantPoppler) {
@@ -84,7 +100,7 @@ async function parseWithUnpdf(u8: Uint8Array, traceId?: string): Promise<string>
 
     // 动态导入并兼容不同导出形态
     const mod: any = await import('unpdf');
-    const extractText: undefined | ((buf: Uint8Array, opts?: any) => Promise<{ text: string }>) =
+    const extractText: undefined | ((buf: Uint8Array, opts?: any) => Promise<{ text?: string } | string>) =
       (mod && typeof mod.extractText === 'function' && mod.extractText)
       || (mod && mod.default && typeof mod.default.extractText === 'function' && mod.default.extractText);
 
@@ -105,7 +121,9 @@ async function parseWithUnpdf(u8: Uint8Array, traceId?: string): Promise<string>
         sortByY: true,
         signal: (controller as any).signal,
       });
-      const text = normalizeText(res?.text || '');
+      // 兼容不同返回形态：字符串或对象
+      const rawText = (typeof res === 'string') ? res : (res?.text ?? '');
+      const text = normalizeText(rawText);
       console.log('[pdf] unpdf.ok', JSON.stringify({ traceId, ms: Date.now() - t0, chars: text.length }));
       return text;
     } finally {
@@ -118,7 +136,7 @@ async function parseWithUnpdf(u8: Uint8Array, traceId?: string): Promise<string>
     try { await fs.unlink(tmpFile); console.log('[pdf] cleanup.file', JSON.stringify({ traceId, tmpFile })); } catch (e: any) {
       console.log('[pdf] cleanup.file.error', JSON.stringify({ traceId, tmpFile, err: String(e?.message || e) }));
     }
-    try { await fs.rmdir(tmpDir); console.log('[pdf] cleanup.dir', JSON.stringify({ traceId, tmpDir })); } catch (e: any) {
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); console.log('[pdf] cleanup.dir', JSON.stringify({ traceId, tmpDir })); } catch (e: any) {
       console.log('[pdf] cleanup.dir.error', JSON.stringify({ traceId, tmpDir, err: String(e?.message || e) }));
     }
   }
@@ -183,7 +201,7 @@ async function parseWithPdfTextExtract(u8: Uint8Array, traceId?: string): Promis
     try { await fs.unlink(tmpFile); console.log('[pdf] cleanup.file', JSON.stringify({ traceId, tmpFile })); } catch (e: any) {
       console.log('[pdf] cleanup.file.error', JSON.stringify({ traceId, tmpFile, err: String(e?.message || e) }));
     }
-    try { await fs.rmdir(tmpDir); console.log('[pdf] cleanup.dir', JSON.stringify({ traceId, tmpDir })); } catch (e: any) {
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); console.log('[pdf] cleanup.dir', JSON.stringify({ traceId, tmpDir })); } catch (e: any) {
       console.log('[pdf] cleanup.dir.error', JSON.stringify({ traceId, tmpDir, err: String(e?.message || e) }));
     }
   }
