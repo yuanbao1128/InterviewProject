@@ -18,6 +18,7 @@ r.post('/parse-resume-task/start', async (c) => {
     return c.json({ ok: false, error: '缺少 resumeFileUrl 或 resumeText' }, 400);
   }
 
+  // 插入时写 created_at/updated_at；若表结构异常，让错误尽早暴露
   const { rows } = await query<{ id: string }>(
     `insert into app.resume_tasks (status, resume_file_url, resume_text, created_at, updated_at)
      values ('pending', $1, $2, now(), now()) returning id`,
@@ -61,6 +62,8 @@ r.get('/parse-resume-task/status', async (c) => {
   console.log('[resume-task] status.query', JSON.stringify({
     taskId, status: rec.status, hasResult: !!rec.result, hasError: !!rec.error
   }));
+  // 强制禁用缓存（Next/Vercel 某些场景可能缓存 GET）
+  c.header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   return c.json({ ok: true, data: { status: rec.status, result: rec.result ?? null, error: rec.error ?? null } });
 });
 
@@ -77,10 +80,12 @@ async function processTask(taskId: string) {
   try {
     // 1) 标记 processing
     const tMark0 = Date.now();
-    const upd = await query(
+    const upd = await safeUpdate(
       `update app.resume_tasks set status='processing', updated_at=now()
        where id=$1 and status in ('pending')`,
-      [taskId]
+      [taskId],
+      `update app.resume_tasks set status='processing'
+       where id=$1 and status in ('pending')`
     );
     ensureDbWriteOk(upd, 'mark processing (maybe already processing/done/error)');
     console.log('[resume-task] mark.processing.ok', JSON.stringify({ ...context, ms: Date.now() - tMark0 }));
@@ -175,10 +180,11 @@ async function processTask(taskId: string) {
       console.log('[resume-task] audit.skip', JSON.stringify({ ...context, err: String(e?.message || e) }));
     }
 
-    // 6) JSON 解析（失败尝试修复）
+    // 6) JSON 解析（增强修复）
     let parsed: any = {};
     try {
-      parsed = JSON.parse(content || '{}');
+      const cleaned = stripCodeFence(content);
+      parsed = JSON.parse(cleaned);
       console.log('[resume-task] json.parse.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
     } catch (e: any) {
       console.log('[resume-task] json.parse.fail.tryFix', JSON.stringify({
@@ -189,41 +195,135 @@ async function processTask(taskId: string) {
         tail: (content || '').slice(-160)
       }));
       try {
-        const fixed = tryFixJson(content || '');
+        const fixed = tryFixJsonAdvanced(content || '');
         parsed = JSON.parse(fixed);
         console.log('[resume-task] json.parse.fixed.ok', JSON.stringify({ ...context, keys: Object.keys(parsed || {}).length }));
       } catch (e2: any) {
-        throw new Error(`JSON 解析失败: ${String(e2?.message || e2)}`);
+        // 仍失败则将原始内容以 raw 字段存入，避免卡住
+        parsed = { raw: content };
+        console.log('[resume-task] json.parse.fixed.fail.storeRaw', JSON.stringify({ ...context, err: String(e2?.message || e2) }));
       }
     }
 
-    // 7) 写回结果
+    // 7) 写回结果（带兜底）
     const tUpd0 = Date.now();
-    const upd2 = await query(
-      `update app.resume_tasks set status='done', result=$2, error=null, updated_at=now() where id=$1`,
-      [taskId, JSON.stringify(parsed)]
-    );
-    ensureDbWriteOk(upd2, 'mark done');
-    console.log('[resume-task] done', JSON.stringify({ ...context, ms: Date.now() - tUpd0 }));
+    try {
+      const upd2 = await safeUpdate(
+        `update app.resume_tasks set status='done', result=$2, error=null, updated_at=now() where id=$1`,
+        [taskId, JSON.stringify(parsed)],
+        `update app.resume_tasks set status='done', result=$2, error=null where id=$1`
+      );
+      ensureDbWriteOk(upd2, 'mark done');
+      console.log('[resume-task] done', JSON.stringify({ ...context, ms: Date.now() - tUpd0 }));
+    } catch (e: any) {
+      // 如果写 result 失败（例如列类型/约束），至少把状态改成 done，避免卡 processing
+      console.error('[resume-task] done.write.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
+      const fallback = await safeUpdate(
+        `update app.resume_tasks set status='done', updated_at=now() where id=$1`,
+        [taskId],
+        `update app.resume_tasks set status='done' where id=$1`
+      );
+      ensureDbWriteOk(fallback, 'mark done (fallback)');
+      console.log('[resume-task] done.fallback', JSON.stringify({ ...context, ms: Date.now() - tUpd0 }));
+    }
   } catch (e: any) {
     const msg = e?.message || String(e);
     console.error('[resume-task] fail', JSON.stringify({ ...context, msg }));
     try {
       const tErr0 = Date.now();
-      const updErr = await query(
+      const updErr = await safeUpdate(
         `update app.resume_tasks set status='error', error=$2, updated_at=now() where id=$1`,
-        [taskId, msg]
+        [taskId, msg],
+        `update app.resume_tasks set status='error', error=$2 where id=$1`
       );
       ensureDbWriteOk(updErr, 'mark error');
       console.log('[resume-task] error.persisted', JSON.stringify({ ...context, ms: Date.now() - tErr0 }));
     } catch (e2: any) {
       console.error('[resume-task] error.persist.failed', JSON.stringify({ ...context, err: String(e2?.message || e2) }));
+      // 最后一层兜底：至少把状态改掉（不带 error 字段）
+      try {
+        const updErr2 = await safeUpdate(
+          `update app.resume_tasks set status='error', updated_at=now() where id=$1`,
+          [taskId],
+          `update app.resume_tasks set status='error' where id=$1`
+        );
+        ensureDbWriteOk(updErr2, 'mark error (fallback2)');
+        console.log('[resume-task] error.persisted.fallback2', JSON.stringify(context));
+      } catch (e3: any) {
+        console.error('[resume-task] error.persist.failed.fallback2', JSON.stringify({ ...context, err: String(e3?.message || e3) }));
+      }
     }
   } finally {
     console.log('[resume-task] process.end', JSON.stringify(context));
   }
 }
 
+// 安全更新：当 updated_at 列缺失时降级；也便于未来在 result 列问题时切换 SQL
+async function safeUpdate(sql: string, params: any[], fallbackSql: string) {
+  try {
+    return await query(sql, params);
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (msg.includes('column "updated_at"') && msg.includes('does not exist')) {
+      console.warn('[safeUpdate] fallback due to missing updated_at');
+      return await query(fallbackSql, params);
+    }
+    return Promise.reject(e);
+  }
+}
+
+// 去掉 Markdown 代码块包裹与 json: 前缀
+function stripCodeFence(s: string) {
+  let t = s.trim();
+  // 提前去除可能的前缀“json:”
+  t = t.replace(/^\s*json\s*:\s*/i, '').trim();
+  // ```json ... ``` 或 ``` ... ```
+  const fence = /^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/m;
+  const m = t.match(fence);
+  if (m && m[1]) t = m[1];
+  return t.trim();
+}
+
+// 更鲁棒的 JSON 修复：提取第一段完整 JSON（{} 或 []），去 BOM、去尾逗号
+function tryFixJsonAdvanced(s: string) {
+  let t = stripCodeFence(s);
+  t = t.replace(/^[^\{[]+/, ''); // 去掉前导非 JSON 结构字符
+  t = t.replace(/\uFEFF/g, '');   // 去 BOM
+
+  const pick = (u: string) => {
+    const open = u.indexOf('{') >= 0 ? '{' : (u.indexOf('[') >= 0 ? '[' : '');
+    if (!open) return '';
+    const close = open === '{' ? '}' : ']';
+    let depth = 0, start = -1, inStr = false, esc = false;
+    for (let i = 0; i < u.length; i++) {
+      const ch = u[i];
+      if (inStr) {
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === '"') { inStr = false; continue; }
+        continue;
+      } else {
+        if (ch === '"') { inStr = true; continue; }
+        if (ch === open) { if (depth === 0) start = i; depth++; continue; }
+        if (ch === close) { depth--; if (depth === 0 && start >= 0) return u.slice(start, i + 1); }
+      }
+    }
+    return '';
+  };
+
+  let core = pick(t);
+  if (!core) {
+    const i = t.indexOf('{');
+    const j = t.lastIndexOf('}');
+    if (i >= 0 && j > i) core = t.slice(i, j + 1);
+  }
+  if (!core) core = '{}';
+  // 去掉 JSON 尾逗号
+  core = core.replace(/,\s*(\}|])/g, '$1');
+  return core;
+}
+
+// 旧版简易修复（保留）
 function tryFixJson(s: string) {
   const i = s.indexOf('{');
   const j = s.lastIndexOf('}');
