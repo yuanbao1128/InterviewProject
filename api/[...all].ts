@@ -79,6 +79,7 @@ app.route('/api', finish)
 app.route('/api', report)
 app.route('/api', metrics)
 app.route('/api', parseResumeTask);
+app.route('/api', testLlm) // 新增：联通性测试
 
 // 导出给 Vercel 适配器
 export const GET = app.fetch

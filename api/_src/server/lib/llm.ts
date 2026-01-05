@@ -1,4 +1,4 @@
-// api/src/server/lib/llm.ts
+// _src/server/lib/llm.ts
 import OpenAI from 'openai'
 
 function sanitizeBase(raw?: string | null) {
@@ -8,29 +8,29 @@ function sanitizeBase(raw?: string | null) {
 }
 
 const PROVIDER_EXPLICIT = (process.env.LLM_PROVIDER || '').toLowerCase() as 'openai' | 'deepseek' | ''
-const BASE_RAW = sanitizeBase(process.env.OPENAI_BASE_URL)
-const API_KEY = process.env.OPENAI_API_KEY || ''
+const BASE_RAW = sanitizeBase(process.env.OPENAI_BASE_URL || process.env.DEEPSEEK_BASE_URL)
+const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || ''
 
 let PROVIDER: 'openai' | 'deepseek' =
   (PROVIDER_EXPLICIT as any) ||
-  (BASE_RAW ? (/deepseek/i.test(BASE_RAW) ? 'deepseek' : /openai/i.test(BASE_RAW) ? 'openai' : 'openai') : 'openai')
+  (BASE_RAW ? (/deepseek/i.test(BASE_RAW) ? 'deepseek' : /openai|api\.openai/i.test(BASE_RAW) ? 'openai' : 'openai') : 'openai')
 
 const DEFAULTS = { openai: 'https://api.openai.com', deepseek: 'https://api.deepseek.com' } as const
 const baseURL = (BASE_RAW || DEFAULTS[PROVIDER]).replace(/\/+$/, '')
 
-if (!API_KEY) throw new Error(`Missing API key for provider=${PROVIDER}. 缺少 OPENAI_API_KEY`)
+if (!API_KEY) {
+  throw new Error(`Missing API key. 请配置 OPENAI_API_KEY 或 DEEPSEEK_API_KEY`)
+}
 
-// 默认 60s，可用 env LLM_TIMEOUT_MS 覆盖
 const UPSTREAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60000)
-// 重试次数
 const UPSTREAM_RETRIES = Number(process.env.LLM_RETRIES || 2)
-// 建议的业务侧硬兜底（parse-resume-task.ts 中使用自己的 env 配置）
 export const HARD_TIMEOUT_SUGGESTED = Number(process.env.LLM_HARD_TIMEOUT_MS || 90000)
 
 console.log('[llm] init', {
   provider: PROVIDER,
-  baseURL: baseURL.replace(/^(https?:\/\/)/, '$1***.'),
-  timeoutMs: UPSTREAM_TIMEOUT_MS
+  baseURL: baseURL.replace(/^(https?:\/\/[^/]+).*/, '$1'),
+  timeoutMs: UPSTREAM_TIMEOUT_MS,
+  retries: UPSTREAM_RETRIES
 })
 
 function createTimedFetch(timeoutMs: number, maxRetries: number) {
@@ -53,11 +53,10 @@ function createTimedFetch(timeoutMs: number, maxRetries: number) {
         clearTimeout(timer)
         const msg = e?.message || String(e)
         const name = e?.name || ''
-        const retriable = name === 'AbortError' || /network|fetch|timeout/i.test(msg)
+        const retriable = name === 'AbortError' || /network|fetch|timeout|socket|ECONNRESET|ETIMEDOUT/i.test(msg)
         console.warn('[llm.fetch.error]', { attempt, name, msg })
         lastErr = e
         if (!retriable || attempt === maxRetries) throw e
-        // 指数退避
         await new Promise(r => setTimeout(r, 400 * attempt))
       }
     }
@@ -71,9 +70,52 @@ const client = new OpenAI({ apiKey: API_KEY, baseURL, fetch: timedFetch as any }
 const MODEL = process.env.MODEL_NAME || (PROVIDER === 'deepseek' ? 'deepseek-chat' : 'gpt-4o-mini')
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || (PROVIDER === 'deepseek' ? '' : 'text-embedding-3-small')
 
-export { client, MODEL, EMBEDDING_MODEL, PROVIDER }
+export { client, MODEL, EMBEDDING_MODEL, PROVIDER, baseURL, API_KEY }
 
-// 流式总超时工具保留
+// 直接 REST 调用，支持 AbortSignal（强制可中断）
+export async function restChatCompletion(opts: {
+  model: string
+  system: string
+  user: string
+  temperature?: number
+  signal?: AbortSignal
+}): Promise<string> {
+  const url = `${baseURL}/v1/chat/completions`
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${API_KEY}`
+  }
+  // DeepSeek 某些环境可能需要组织/项目头，按需开启：
+  if (process.env.DS_ORG_ID) headers['X-Organization'] = process.env.DS_ORG_ID
+  if (process.env.DS_PROJECT_ID) headers['X-Project'] = process.env.DS_PROJECT_ID
+
+  const body = {
+    model: opts.model,
+    temperature: typeof opts.temperature === 'number' ? opts.temperature : 0.2,
+    messages: [
+      { role: 'system', content: opts.system },
+      { role: 'user', content: opts.user }
+    ]
+  }
+
+  const res = await timedFetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: opts.signal as any
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`LLM HTTP ${res.status}: ${text.slice(0, 400)}`)
+  }
+
+  const json: any = await res.json()
+  const content = json?.choices?.[0]?.message?.content ?? ''
+  return String(content || '')
+}
+
 export async function* withTimeoutStream<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T, void, unknown> {
   const iterator = iterable[Symbol.asyncIterator]()
   try {

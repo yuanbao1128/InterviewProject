@@ -19,8 +19,8 @@ r.post('/parse-resume-task/start', async (c) => {
   }
 
   const { rows } = await query<{ id: string }>(
-    `insert into app.resume_tasks (status, resume_file_url, resume_text)
-     values ('pending', $1, $2) returning id`,
+    `insert into app.resume_tasks (status, resume_file_url, resume_text, created_at, updated_at)
+     values ('pending', $1, $2, now(), now()) returning id`,
     [resumeFileUrl || null, resumeText || null]
   );
   const taskId = rows[0].id;
@@ -35,10 +35,25 @@ r.post('/parse-resume-task/start', async (c) => {
   return c.json({ ok: true, data: { taskId } });
 });
 
-// 查询任务状态
+// 查询任务状态（含“守护回收”：processing 超过 10 分钟自动置为 error）
 r.get('/parse-resume-task/status', async (c) => {
   const taskId = c.req.query('taskId');
   if (!taskId) return c.json({ ok: false, error: '缺少 taskId' }, 400);
+
+  try {
+    const upd = await query(
+      `update app.resume_tasks
+       set status='error', error=coalesce(error,'expired by watchdog'), updated_at=now()
+       where id=$1 and status='processing' and now() - updated_at > interval '10 minutes'`,
+      [taskId]
+    );
+    if (upd.rowCount && upd.rowCount > 0) {
+      console.log('[resume-task] watchdog.expired', JSON.stringify({ taskId, rowCount: upd.rowCount }));
+    }
+  } catch (e: any) {
+    console.log('[resume-task] watchdog.skip', JSON.stringify({ taskId, err: String(e?.message || e) }));
+  }
+
   const { rows } = await query<any>(`select id, status, result, error from app.resume_tasks where id = $1`, [taskId]);
   if (rows.length === 0) return c.json({ ok: false, error: '任务不存在' }, 404);
 
@@ -62,7 +77,11 @@ async function processTask(taskId: string) {
   try {
     // 1) 标记 processing
     const tMark0 = Date.now();
-    const upd = await query(`update app.resume_tasks set status='processing' where id=$1 and status in ('pending')`, [taskId]);
+    const upd = await query(
+      `update app.resume_tasks set status='processing', updated_at=now()
+       where id=$1 and status in ('pending')`,
+      [taskId]
+    );
     ensureDbWriteOk(upd, 'mark processing (maybe already processing/done/error)');
     console.log('[resume-task] mark.processing.ok', JSON.stringify({ ...context, ms: Date.now() - tMark0 }));
 
@@ -92,7 +111,7 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本');
     }
 
-    // 4) LLM 非流式调用（加入硬兜底超时与心跳日志）
+    // 4) LLM 调用（增加硬兜底超时与心跳日志）
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}';
@@ -101,14 +120,13 @@ async function processTask(taskId: string) {
     console.log('[resume-task] llm.start', JSON.stringify({ ...context, model: MODEL }));
 
     let content = '';
-    // 兜底超时：避免上游长时间不首包导致“卡住不报错”
-    const hardTimeoutMs = Number(process.env.LLM_HARD_TIMEOUT_MS || 90000); // 默认 90s
+    const hardTimeoutMs = Number(process.env.LLM_HARD_TIMEOUT_MS || 60000); // 默认 60s
     const heartbeat = setInterval(() => {
       console.log('[resume-task] llm.waiting', JSON.stringify({ ...context, elapsed: Date.now() - t0 }));
     }, 2000);
 
     try {
-      // 方式 A：沿用 SDK，但外面再包一层 Promise.race 做硬兜底超时
+      // 用 SDK，但外层加 Promise.race 硬超时
       const p = client.chat.completions.create({
         model: MODEL,
         messages: [
@@ -125,16 +143,9 @@ async function processTask(taskId: string) {
 
       const choice = resp?.choices?.[0];
       content = choice?.message?.content ?? '';
-
-      console.log('[resume-task] llm.nostream.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: content.length }));
-
-      // 方式 B：可选，绕过 SDK 直接 REST（排查 SDK 卡顿时启用）
-      // const { restCompletion } = await import('../util-rest-llm.js'); // 需要你创建一个简单的 REST 调用工具
-      // const contentByRest = await restCompletion(sys, rawText, MODEL, hardTimeoutMs);
-      // content = contentByRest;
-      // console.log('[resume-task] llm.rest.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: content.length }));
+      console.log('[resume-task] llm.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: content.length }));
     } catch (e: any) {
-      console.error('[resume-task] llm.nostream.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
+      console.error('[resume-task] llm.error', JSON.stringify({ ...context, err: String(e?.message || e) }));
       throw e;
     } finally {
       clearInterval(heartbeat);
@@ -144,7 +155,7 @@ async function processTask(taskId: string) {
       throw new Error('LLM 返回空响应');
     }
 
-    // 5) 审计
+    // 5) 审计（可失败不阻塞）
     const latency = Date.now() - t0;
     const tAudit0 = Date.now();
     try {
@@ -189,7 +200,7 @@ async function processTask(taskId: string) {
     // 7) 写回结果
     const tUpd0 = Date.now();
     const upd2 = await query(
-      `update app.resume_tasks set status='done', result=$2, error=null where id=$1`,
+      `update app.resume_tasks set status='done', result=$2, error=null, updated_at=now() where id=$1`,
       [taskId, JSON.stringify(parsed)]
     );
     ensureDbWriteOk(upd2, 'mark done');
@@ -200,7 +211,7 @@ async function processTask(taskId: string) {
     try {
       const tErr0 = Date.now();
       const updErr = await query(
-        `update app.resume_tasks set status='error', error=$2 where id=$1`,
+        `update app.resume_tasks set status='error', error=$2, updated_at=now() where id=$1`,
         [taskId, msg]
       );
       ensureDbWriteOk(updErr, 'mark error');
