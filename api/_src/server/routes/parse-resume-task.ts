@@ -8,7 +8,7 @@ import { auditLLM } from '../lib/util.js'
 
 const r = new Hono()
 
-// 启动任务
+// 启动任务（完全异步：立即返回，由事件循环继续处理）
 r.post('/parse-resume-task/start', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const resumeFileUrl = typeof body?.resumeFileUrl === 'string' ? body.resumeFileUrl.trim() : ''
@@ -18,7 +18,6 @@ r.post('/parse-resume-task/start', async (c) => {
     return c.json({ ok: false, error: '缺少 resumeFileUrl 或 resumeText' }, 400)
   }
 
-  // 插入任务
   const { rows } = await query<{ id: string }>(
     `insert into app.resume_tasks (status, resume_file_url, resume_text, created_at, updated_at)
      values ('pending', $1, $2, now(), now()) returning id`,
@@ -28,18 +27,14 @@ r.post('/parse-resume-task/start', async (c) => {
 
   console.log('[resume-task] start.accepted', JSON.stringify({ taskId, hasFileUrl: !!resumeFileUrl, hasText: !!resumeText }))
 
-  // 启动后台处理：为避免 serverless 被立即回收，做一个极短的“内联先跑 2.5s”，超过即返回
-  try {
-    const p = processTask(taskId)
-    await Promise.race([
-      p,
-      new Promise<void>((resolve) => setTimeout(resolve, 2500)) // 2.5s 内若能完成就同步完成；否则交由后台继续
-    ])
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    console.error('[resume-task] process.inline.error', { taskId, err: msg })
-  }
+  // 真正后台化：用微任务/下一个 tick 脱离请求生命周期
+  setTimeout(() => {
+    processTask(taskId).catch((e) => {
+      console.error('[resume-task] processTask unhandled', { taskId, err: String(e?.message || e) })
+    })
+  }, 0)
 
+  // 立即返回 taskId，前端自行轮询 /status
   return c.json({ ok: true, data: { taskId } })
 })
 
@@ -69,8 +64,22 @@ r.get('/parse-resume-task/status', async (c) => {
   console.log('[resume-task] status.query', JSON.stringify({
     taskId, status: rec.status, hasResult: !!rec.result, hasError: !!rec.error
   }))
+
   c.header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
   return c.json({ ok: true, data: { status: rec.status, result: rec.result ?? null, error: rec.error ?? null } })
+})
+
+// 新增：全局守护（可被定时触发），批量将超时 processing 置 error
+r.post('/parse-resume-task/watchdog-sweep', async (c) => {
+  const minutes = Number((await c.req.json().catch(() => ({})))?.minutes || 10)
+  const { rowCount } = await query(
+    `update app.resume_tasks
+     set status='error', error=coalesce(error,'expired by watchdog sweep'), updated_at=now()
+     where status='processing' and now() - updated_at > ($1::int || ' minutes')::interval`,
+    [minutes]
+  )
+  console.log('[resume-task] watchdog.sweep', JSON.stringify({ minutes, affected: rowCount || 0 }))
+  return c.json({ ok: true, data: { affected: rowCount || 0 } })
 })
 
 export default r
@@ -78,10 +87,16 @@ export default r
 // 处理逻辑
 async function processTask(taskId: string) {
   const context = { taskId }
+  const startedAt = Date.now()
   console.log('[resume-task] process.start', JSON.stringify({
     ...context,
     runtime: { edge: (globalThis as any).EdgeRuntime || null, node: typeof process?.versions?.node }
   }))
+
+  // 后台“保活心跳”，避免无日志导致平台回收
+  const heartbeat = setInterval(() => {
+    console.log('[resume-task] heartbeat', JSON.stringify({ ...context, aliveForMs: Date.now() - startedAt }))
+  }, 2000)
 
   try {
     // 1) 标记 processing
@@ -95,6 +110,9 @@ async function processTask(taskId: string) {
     )
     ensureDbWriteOk(upd, 'mark processing (maybe already processing/done/error)')
     console.log('[resume-task] mark.processing.ok', JSON.stringify({ ...context, ms: Date.now() - tMark0 }))
+
+    // 小延迟，确保日志 flush
+    await tinyYield()
 
     // 2) 读取任务输入
     const tRead0 = Date.now()
@@ -111,6 +129,8 @@ async function processTask(taskId: string) {
       const buf = await downloadFromStorage(STORAGE_BUCKET, fileUrl, taskId)
       console.log('[resume-task] download.ok', JSON.stringify({ ...context, ms: Date.now() - tDl0, bytes: buf.byteLength }))
 
+      await tinyYield()
+
       console.log('[resume-task] extract.start', JSON.stringify(context))
       const tEx0 = Date.now()
       rawText = await pdfArrayBufferToText(buf, taskId)
@@ -122,20 +142,17 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本')
     }
 
-    // 4) LLM 调用：使用 REST + AbortSignal + 心跳日志 + 硬超时
+    // 4) LLM 调用（REST + AbortSignal）
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}'
 
     const t0 = Date.now()
-    const hardTimeoutMs = Number(process.env.LLM_HARD_TIMEOUT_MS || 60000) // 可通过环境变量调整
-    console.log('[resume-task] llm.start', JSON.stringify({ ...context, model: MODEL, inputChars: (rawText || '').length, hardTimeoutMs }))
+    const hardTimeoutMs = Number(process.env.LLM_HARD_TIMEOUT_MS || 60000)
+    const reqId = `${taskId.slice(0, 8)}-${t0}`
+    console.log('[resume-task] llm.start', JSON.stringify({ ...context, reqId, model: MODEL, inputChars: (rawText || '').length, hardTimeoutMs }))
 
     let content = ''
-    const heartbeat = setInterval(() => {
-      console.log('[resume-task] llm.waiting', JSON.stringify({ ...context, elapsed: Date.now() - t0 }))
-    }, 2000)
-
     try {
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), hardTimeoutMs)
@@ -147,15 +164,13 @@ async function processTask(taskId: string) {
           temperature: 0.2,
           signal: ctrl.signal
         })
-        console.log('[resume-task] llm.ok', JSON.stringify({ ...context, ms: Date.now() - t0, bytes: (content || '').length }))
+        console.log('[resume-task] llm.ok', JSON.stringify({ ...context, reqId, ms: Date.now() - t0, bytes: (content || '').length }))
       } finally {
         clearTimeout(timer)
       }
     } catch (e: any) {
-      console.error('[resume-task] llm.error', JSON.stringify({ ...context, err: String(e?.message || e) }))
+      console.error('[resume-task] llm.error', JSON.stringify({ ...context, reqId, err: String(e?.message || e) }))
       throw e
-    } finally {
-      clearInterval(heartbeat)
     }
 
     if (!content || !content.trim()) {
@@ -253,11 +268,17 @@ async function processTask(taskId: string) {
       }
     }
   } finally {
+    clearInterval(heartbeat)
     console.log('[resume-task] process.end', JSON.stringify(context))
   }
 }
 
-// 安全更新：当 updated_at 列缺失时降级；也便于未来在 result 列问题时切换 SQL
+// 小让步：让事件循环在耗时步骤之间有机会调度，帮助日志持续刷新
+function tinyYield(ms = 10) {
+  return new Promise<void>((r) => setTimeout(r, ms))
+}
+
+// 安全更新：当 updated_at 列缺失时降级
 async function safeUpdate(sql: string, params: any[], fallbackSql: string) {
   try {
     return await query(sql, params)
@@ -317,14 +338,6 @@ function tryFixJsonAdvanced(s: string) {
   if (!core) core = '{}'
   core = core.replace(/,\s*(\}|])/g, '$1')
   return core
-}
-
-// 旧版简易修复（保留）
-function tryFixJson(s: string) {
-  const i = s.indexOf('{')
-  const j = s.lastIndexOf('}')
-  if (i >= 0 && j > i) return s.slice(i, j + 1)
-  return '{}'
 }
 
 export const config = { runtime: 'nodejs' }
