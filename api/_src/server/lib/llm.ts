@@ -86,7 +86,6 @@ export async function restChatCompletion(opts: {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${API_KEY}`
   }
-  // DeepSeek 某些环境可能需要组织/项目头，按需开启：
   if (process.env.DS_ORG_ID) headers['X-Organization'] = process.env.DS_ORG_ID
   if (process.env.DS_PROJECT_ID) headers['X-Project'] = process.env.DS_PROJECT_ID
 
