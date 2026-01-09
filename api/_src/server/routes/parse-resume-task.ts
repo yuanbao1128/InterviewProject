@@ -29,9 +29,19 @@ r.post('/parse-resume-task/start', async (c) => {
   console.log('[resume-task] start.accepted', JSON.stringify({ taskId, hasFileUrl: !!resumeFileUrl, hasText: !!resumeText }));
 
   // 异步处理
-  processTask(taskId).catch((e) => {
-    console.error('[resume-task] processTask unhandled', { taskId, err: String(e?.message || e) });
-  });
+//   processTask(taskId).catch((e) => {
+//     console.error('[resume-task] processTask unhandled', { taskId, err: String(e?.message || e) });
+//   });
+
+  try {
+  const p = processTask(taskId);
+  await Promise.race([
+  p,
+  new Promise((resolve) => setTimeout(resolve, 25000))
+  ]);
+  } catch (e) {
+  console.error('[resume-task] process.inline.error', { taskId, err: String(e?.message || e) });
+  }
 
   return c.json({ ok: true, data: { taskId } });
 });
