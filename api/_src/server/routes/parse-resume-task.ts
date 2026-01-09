@@ -34,13 +34,13 @@ r.post('/parse-resume-task/start', async (c) => {
 //   });
 
   try {
-  const p = processTask(taskId);
-  await Promise.race([
-  p,
-  new Promise((resolve) => setTimeout(resolve, 25000))
-  ]);
+      const p = processTask(taskId);
+      await Promise.race([
+          p,
+          new Promise((resolve) => setTimeout(resolve, 25000))
+      ]);
   } catch (e) {
-  console.error('[resume-task] process.inline.error', { taskId, err: String(e?.message || e) });
+     console.error('[resume-task] process.inline.error', { taskId, err: String((e as any)?.message || e) })
   }
 
   return c.json({ ok: true, data: { taskId } });
