@@ -1,4 +1,4 @@
-// _src/server/lib/llm.ts
+// api/_src/server/lib/llm.ts 仅增加 ali 分支（可选）
 import OpenAI from 'openai'
 
 function sanitizeBase(raw?: string | null) {
@@ -7,19 +7,19 @@ function sanitizeBase(raw?: string | null) {
   return v.replace(/\/+$/, '').replace(/\/v1$/i, '')
 }
 
-const PROVIDER_EXPLICIT = (process.env.LLM_PROVIDER || '').toLowerCase() as 'openai' | 'deepseek' | ''
-const BASE_RAW = sanitizeBase(process.env.OPENAI_BASE_URL || process.env.DEEPSEEK_BASE_URL)
-const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || ''
+const PROVIDER_EXPLICIT = (process.env.LLM_PROVIDER || '').toLowerCase() as 'openai' | 'deepseek' | 'ali' | ''
+const BASE_RAW = sanitizeBase(process.env.OPENAI_BASE_URL || process.env.DEEPSEEK_BASE_URL || process.env.ALI_BASE_URL)
+const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || process.env.ALI_API_KEY || ''
 
-let PROVIDER: 'openai' | 'deepseek' =
+let PROVIDER: 'openai' | 'deepseek' | 'ali' =
   (PROVIDER_EXPLICIT as any) ||
-  (BASE_RAW ? (/deepseek/i.test(BASE_RAW) ? 'deepseek' : /openai|api\.openai/i.test(BASE_RAW) ? 'openai' : 'openai') : 'openai')
+  (BASE_RAW ? (/deepseek/i.test(BASE_RAW) ? 'deepseek' : /openai|api\.openai/i.test(BASE_RAW) ? 'openai' : /dashscope|aliyun|ali/i.test(BASE_RAW) ? 'ali' : 'openai') : 'openai')
 
-const DEFAULTS = { openai: 'https://api.openai.com', deepseek: 'https://api.deepseek.com' } as const
+const DEFAULTS = { openai: 'https://api.openai.com', deepseek: 'https://api.deepseek.com', ali: 'https://dashscope.aliyuncs.com/compatible-mode/v1' } as const
 const baseURL = (BASE_RAW || DEFAULTS[PROVIDER]).replace(/\/+$/, '')
 
 if (!API_KEY) {
-  throw new Error(`Missing API key. 请配置 OPENAI_API_KEY 或 DEEPSEEK_API_KEY`)
+  throw new Error(`Missing API key. 请配置 OPENAI_API_KEY 或 DEEPSEEK_API_KEY 或 ALI_API_KEY`)
 }
 
 const UPSTREAM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60000)
@@ -67,12 +67,15 @@ function createTimedFetch(timeoutMs: number, maxRetries: number) {
 const timedFetch = createTimedFetch(UPSTREAM_TIMEOUT_MS, UPSTREAM_RETRIES)
 const client = new OpenAI({ apiKey: API_KEY, baseURL, fetch: timedFetch as any })
 
-const MODEL = process.env.MODEL_NAME || (PROVIDER === 'deepseek' ? 'deepseek-chat' : 'gpt-4o-mini')
+const MODEL = process.env.MODEL_NAME || (
+  PROVIDER === 'deepseek' ? 'deepseek-chat' :
+  PROVIDER === 'ali' ? 'qwen-plus' :
+  'gpt-4o-mini'
+)
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || (PROVIDER === 'deepseek' ? '' : 'text-embedding-3-small')
 
 export { client, MODEL, EMBEDDING_MODEL, PROVIDER, baseURL, API_KEY }
 
-// 直接 REST 调用，支持 AbortSignal（强制可中断）
 export async function restChatCompletion(opts: {
   model: string
   system: string
@@ -81,7 +84,6 @@ export async function restChatCompletion(opts: {
   signal?: AbortSignal
 }): Promise<string> {
   const url = `${baseURL}/v1/chat/completions`
-
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${API_KEY}`
@@ -113,20 +115,4 @@ export async function restChatCompletion(opts: {
   const json: any = await res.json()
   const content = json?.choices?.[0]?.message?.content ?? ''
   return String(content || '')
-}
-
-export async function* withTimeoutStream<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T, void, unknown> {
-  const iterator = iterable[Symbol.asyncIterator]()
-  try {
-    while (true) {
-      const result = await Promise.race([
-        iterator.next(),
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`stream timeout after ${ms}ms`)), ms))
-      ])
-      if ((result as any).done) break
-      yield (result as any).value
-    }
-  } finally {
-    try { await (iterator as any).return?.() } catch {}
-  }
 }

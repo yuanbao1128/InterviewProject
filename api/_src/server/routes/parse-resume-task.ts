@@ -1,14 +1,14 @@
-// api/src/server/routes/parse-resume-task.ts
+// api/_src/server/routes/parse-resume-task.ts
 import { Hono } from 'hono'
 import { query, ensureDbWriteOk } from '../lib/db.js'
 import { MODEL, restChatCompletion } from '../lib/llm.js'
 import { STORAGE_BUCKET } from '../lib/supabase.js'
 import { downloadFromStorage, pdfArrayBufferToText } from '../lib/pdf.js'
 import { auditLLM } from '../lib/util.js'
+import { sendTaskMessage } from '../lib/mns.js'
 
 const r = new Hono()
 
-// 启动任务（完全异步：立即返回，由事件循环继续处理）
 r.post('/parse-resume-task/start', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const resumeFileUrl = typeof body?.resumeFileUrl === 'string' ? body.resumeFileUrl.trim() : ''
@@ -27,18 +27,19 @@ r.post('/parse-resume-task/start', async (c) => {
 
   console.log('[resume-task] start.accepted', JSON.stringify({ taskId, hasFileUrl: !!resumeFileUrl, hasText: !!resumeText }))
 
-  // 真正后台化：用微任务/下一个 tick 脱离请求生命周期
-  setTimeout(() => {
-    processTask(taskId).catch((e) => {
-      console.error('[resume-task] processTask unhandled', { taskId, err: String(e?.message || e) })
-    })
-  }, 0)
+  try {
+    await sendTaskMessage(taskId)
+    console.log('[resume-task] queued', { taskId })
+  } catch (e: any) {
+    console.error('[resume-task] queue.fail', { taskId, err: String(e?.message || e) })
+    // 队列失败就直接报错并回滚状态
+    await query(`update app.resume_tasks set status='error', error=$2, updated_at=now() where id=$1`, [taskId, 'queue failed'])
+    return c.json({ ok: false, error: '任务入队失败' }, 500)
+  }
 
-  // 立即返回 taskId，前端自行轮询 /status
   return c.json({ ok: true, data: { taskId } })
 })
 
-// 查询任务状态（含“守护回收”：processing 超过 10 分钟自动置为 error）
 r.get('/parse-resume-task/status', async (c) => {
   const taskId = c.req.query('taskId')
   if (!taskId) return c.json({ ok: false, error: '缺少 taskId' }, 400)
@@ -69,7 +70,6 @@ r.get('/parse-resume-task/status', async (c) => {
   return c.json({ ok: true, data: { status: rec.status, result: rec.result ?? null, error: rec.error ?? null } })
 })
 
-// 新增：全局守护（可被定时触发），批量将超时 processing 置 error
 r.post('/parse-resume-task/watchdog-sweep', async (c) => {
   const minutes = Number((await c.req.json().catch(() => ({})))?.minutes || 10)
   const { rowCount } = await query(
@@ -84,8 +84,8 @@ r.post('/parse-resume-task/watchdog-sweep', async (c) => {
 
 export default r
 
-// 处理逻辑
-async function processTask(taskId: string) {
+// 供 Worker 复用的一次性处理逻辑
+export async function processTaskOnce(taskId: string) {
   const context = { taskId }
   const startedAt = Date.now()
   console.log('[resume-task] process.start', JSON.stringify({
@@ -93,13 +93,7 @@ async function processTask(taskId: string) {
     runtime: { edge: (globalThis as any).EdgeRuntime || null, node: typeof process?.versions?.node }
   }))
 
-  // 后台“保活心跳”，避免无日志导致平台回收
-  const heartbeat = setInterval(() => {
-    console.log('[resume-task] heartbeat', JSON.stringify({ ...context, aliveForMs: Date.now() - startedAt }))
-  }, 2000)
-
   try {
-    // 1) 标记 processing
     const tMark0 = Date.now()
     const upd = await safeUpdate(
       `update app.resume_tasks set status='processing', updated_at=now()
@@ -111,10 +105,6 @@ async function processTask(taskId: string) {
     ensureDbWriteOk(upd, 'mark processing (maybe already processing/done/error)')
     console.log('[resume-task] mark.processing.ok', JSON.stringify({ ...context, ms: Date.now() - tMark0 }))
 
-    // 小延迟，确保日志 flush
-    await tinyYield()
-
-    // 2) 读取任务输入
     const tRead0 = Date.now()
     const { rows } = await query<any>(`select id, resume_file_url, resume_text from app.resume_tasks where id=$1`, [taskId])
     console.log('[resume-task] task.read', JSON.stringify({ ...context, ms: Date.now() - tRead0, found: rows.length }))
@@ -122,14 +112,11 @@ async function processTask(taskId: string) {
     let rawText: string | null = rows[0].resume_text
     const fileUrl: string | null = rows[0].resume_file_url
 
-    // 3) 下载并提取文本（如需要）
     if ((!rawText || !rawText.trim()) && fileUrl) {
       console.log('[resume-task] download.start', JSON.stringify({ ...context, bucket: STORAGE_BUCKET, fileUrl }))
       const tDl0 = Date.now()
       const buf = await downloadFromStorage(STORAGE_BUCKET, fileUrl, taskId)
       console.log('[resume-task] download.ok', JSON.stringify({ ...context, ms: Date.now() - tDl0, bytes: buf.byteLength }))
-
-      await tinyYield()
 
       console.log('[resume-task] extract.start', JSON.stringify(context))
       const tEx0 = Date.now()
@@ -142,7 +129,6 @@ async function processTask(taskId: string) {
       throw new Error('未获取到简历文本')
     }
 
-    // 4) LLM 调用（REST + AbortSignal）
     const sys =
       '你是资深招聘顾问，请将简历要点结构化提炼，严格输出 JSON：' +
       '{summary: string, highlights: string[], skills: string[], projects: [{name, role, contributions: string[], metrics: string[]}]}'
@@ -177,7 +163,6 @@ async function processTask(taskId: string) {
       throw new Error('LLM 返回空响应')
     }
 
-    // 5) 审计（可失败不阻塞）
     const latency = Date.now() - t0
     const tAudit0 = Date.now()
     try {
@@ -197,7 +182,6 @@ async function processTask(taskId: string) {
       console.log('[resume-task] audit.skip', JSON.stringify({ ...context, err: String(e?.message || e) }))
     }
 
-    // 6) JSON 解析（增强修复）
     let parsed: any = {}
     try {
       const cleaned = stripCodeFence(content)
@@ -221,7 +205,6 @@ async function processTask(taskId: string) {
       }
     }
 
-    // 7) 写回结果（带兜底）
     const tUpd0 = Date.now()
     try {
       const upd2 = await safeUpdate(
@@ -268,17 +251,11 @@ async function processTask(taskId: string) {
       }
     }
   } finally {
-    clearInterval(heartbeat)
     console.log('[resume-task] process.end', JSON.stringify(context))
   }
 }
 
-// 小让步：让事件循环在耗时步骤之间有机会调度，帮助日志持续刷新
-function tinyYield(ms = 10) {
-  return new Promise<void>((r) => setTimeout(r, ms))
-}
-
-// 安全更新：当 updated_at 列缺失时降级
+// 以下工具函数与原文件一致
 async function safeUpdate(sql: string, params: any[], fallbackSql: string) {
   try {
     return await query(sql, params)
@@ -291,8 +268,6 @@ async function safeUpdate(sql: string, params: any[], fallbackSql: string) {
     return Promise.reject(e)
   }
 }
-
-// 去掉 Markdown 代码块包裹与 json: 前缀
 function stripCodeFence(s: string) {
   let t = s.trim()
   t = t.replace(/^\s*json\s*:\s*/i, '').trim()
@@ -301,13 +276,10 @@ function stripCodeFence(s: string) {
   if (m && m[1]) t = m[1]
   return t.trim()
 }
-
-// 更鲁棒的 JSON 修复：提取第一段完整 JSON（{} 或 []），去 BOM、去尾逗号
 function tryFixJsonAdvanced(s: string) {
   let t = stripCodeFence(s)
   t = t.replace(/^[^\{[]+/, '')
   t = t.replace(/\uFEFF/g, '')
-
   const pick = (u: string) => {
     const open = u.indexOf('{') >= 0 ? '{' : (u.indexOf('[') >= 0 ? '[' : '')
     if (!open) return ''
@@ -328,7 +300,6 @@ function tryFixJsonAdvanced(s: string) {
     }
     return ''
   }
-
   let core = pick(t)
   if (!core) {
     const i = t.indexOf('{')
@@ -339,5 +310,3 @@ function tryFixJsonAdvanced(s: string) {
   core = core.replace(/,\s*(\}|])/g, '$1')
   return core
 }
-
-export const config = { runtime: 'nodejs' }
